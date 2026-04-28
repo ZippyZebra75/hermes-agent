@@ -360,18 +360,17 @@ export function TextInput({
 
   const nativeCursor = focus && termFocus && !selected && !!stdout?.isTTY
 
-  // When the hardware cursor will be parked on the placeholder's first cell,
-  // skip the synthetic invert so we don't render two cursor glyphs (one
-  // hardware block + one inverse-styled character) at column 0. Use a
-  // non-breaking space at column 0 so the cell is visible (the terminal's
-  // cursor draws on top), and dim the rest of the placeholder afterwards.
+  // Placeholder text is just a hint, not a selection — render it dim
+  // without inverse styling. In a TTY the hardware cursor parks at column
+  // 0 and visually marks the input start. Non-TTY surfaces still need the
+  // synthetic inverse first-char to draw a cursor at all.
   const rendered = useMemo(() => {
     if (!focus) {
       return display || dim(placeholder)
     }
 
     if (!display && placeholder) {
-      return nativeCursor ? ' ' + dim(placeholder.slice(1)) : invert(placeholder[0] ?? ' ') + dim(placeholder.slice(1))
+      return nativeCursor ? dim(placeholder) : invert(placeholder[0] ?? ' ') + dim(placeholder.slice(1))
     }
 
     if (selected) {
