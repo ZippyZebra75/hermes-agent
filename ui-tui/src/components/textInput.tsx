@@ -334,22 +334,17 @@ export function TextInput({
 
   const layout = useMemo(() => cursorLayout(display, cur, columns), [columns, cur, display])
 
-  const canUseNativeCursor = Boolean(display)
-
   const boxRef = useDeclaredCursor({
     line: layout.line,
     column: layout.column,
-    active: focus && termFocus && !selected && canUseNativeCursor
+    active: focus && termFocus && !selected
   })
 
   // Hide the hardware cursor while a selection is active (prevents
   // auto-wrap onto the next row when inverted text fills the column
-  // exactly), when the terminal loses focus (suppresses the hollow-rect
-  // ghost most terminals draw at the parked position), or while rendering
-  // a placeholder with the synthetic cursor. Otherwise Terminal.app can
-  // show both cursors: one parked before the prompt and one on the
-  // placeholder's first character.
-  const hideHardwareCursor = focus && !!stdout?.isTTY && (!!selected || !termFocus || !canUseNativeCursor)
+  // exactly) or when the terminal loses focus (suppresses the hollow-rect
+  // ghost most terminals draw at the parked position).
+  const hideHardwareCursor = focus && !!stdout?.isTTY && (!!selected || !termFocus)
 
   useEffect(() => {
     if (!hideHardwareCursor || !stdout) {
@@ -363,15 +358,20 @@ export function TextInput({
     }
   }, [hideHardwareCursor, stdout])
 
-  const nativeCursor = focus && termFocus && !selected && canUseNativeCursor && !!stdout?.isTTY
+  const nativeCursor = focus && termFocus && !selected && !!stdout?.isTTY
 
+  // When the hardware cursor will be parked on the placeholder's first cell,
+  // skip the synthetic invert so we don't render two cursor glyphs (one
+  // hardware block + one inverse-styled character) at column 0. Use a
+  // non-breaking space at column 0 so the cell is visible (the terminal's
+  // cursor draws on top), and dim the rest of the placeholder afterwards.
   const rendered = useMemo(() => {
     if (!focus) {
       return display || dim(placeholder)
     }
 
     if (!display && placeholder) {
-      return nativeCursor ? dim(placeholder) : invert(placeholder[0] ?? ' ') + dim(placeholder.slice(1))
+      return nativeCursor ? ' ' + dim(placeholder.slice(1)) : invert(placeholder[0] ?? ' ') + dim(placeholder.slice(1))
     }
 
     if (selected) {
