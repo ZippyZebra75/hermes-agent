@@ -1268,12 +1268,15 @@ class TelegramAdapter(BasePlatformAdapter):
         return bool(getattr(self, "_rich_messages_enabled", True))
 
     def _rich_content_ok(self, content: str) -> bool:
-        """Shape checks shared by rich sends and rich drafts (non-blank, no Desktop crash/garble
-        shapes, under the cap, async-capable bot)."""
+        """Shape checks shared by rich sends and rich drafts (non-blank, no Desktop crash
+        shapes, under the cap, async-capable bot).
+
+        CJK garble check removed (local patch): TDesktop #47653 workaround 误伤手机端，
+        中文表格被降级。Desktop CJK 渲染问题保留 details/math crash 防护即可。
+        """
         return bool(
             content and content.strip()
             and not self._has_telegram_desktop_details_math_crash_shape(content)
-            and not self._has_telegram_desktop_cjk_rich_garble_shape(content)
             and self._content_fits_rich_limits(content)
             and self._bot_supports_rich())
 
