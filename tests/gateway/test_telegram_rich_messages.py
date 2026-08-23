@@ -115,14 +115,20 @@ async def test_math_outside_details_still_uses_rich_send():
 
 
 @pytest.mark.asyncio
-async def test_astral_cjk_rich_content_skips_rich_send_to_avoid_tdesktop_garble():
+async def test_astral_cjk_rich_content_uses_rich_send():
+    """CJK tables go through sendRichMessage after the TDesktop #47653
+    workaround removal — the content guard misclassified mobile CJK tables
+    (误伤手机端中文表格) and forced them onto the legacy path."""
     adapter = _make_adapter()
 
     result = await adapter.send("12345", ASTRAL_CJK_RICH_CONTENT)
 
     assert result.success is True
-    adapter._bot.do_api_request.assert_not_called()
-    adapter._bot.send_message.assert_awaited_once()
+    bot = adapter._bot
+    assert bot is not None
+    bot.do_api_request.assert_awaited_once()
+    assert bot.do_api_request.call_args.args[0] == "sendRichMessage"
+    bot.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -365,15 +371,21 @@ async def test_table_only_uses_legacy_with_default_config():
 
 
 @pytest.mark.asyncio
-async def test_cjk_rich_content_skips_rich_draft_to_avoid_tdesktop_garble():
+async def test_cjk_rich_content_uses_rich_draft():
+    """CJK tables emit sendRichMessageDraft frames after the TDesktop #47653
+    workaround removal — the CJK guard forced legacy drafts and downgraded
+    mobile Chinese tables to bullet lists."""
     adapter = _make_adapter(extra={"rich_drafts": True})
     adapter._bot.do_api_request = AsyncMock(return_value=True)
 
     result = await adapter.send_draft("12345", draft_id=7, content=CJK_RICH_CONTENT)
 
     assert result.success is True
-    adapter._bot.do_api_request.assert_not_called()
-    adapter._bot.send_message_draft.assert_awaited_once()
+    bot = adapter._bot
+    assert bot is not None
+    bot.do_api_request.assert_awaited_once()
+    assert bot.do_api_request.call_args.args[0] == "sendRichMessageDraft"
+    bot.send_message_draft.assert_not_called()
 
 
 # ----------------------------------------------------------------------
