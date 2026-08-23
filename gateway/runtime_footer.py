@@ -30,9 +30,21 @@ def _home_relative_cwd(cwd: str) -> str:
         return cwd
 
 
+# Local display aliases for the footer model field: full model id (vendor
+# prefix already stripped) -> compact label. Kept local to the patch stack;
+# extend here when another model needs a shorter footer name.
+_FOOTER_MODEL_ALIASES = {
+    "deepseek-v4-flash": "DSv4flash",
+}
+
+
 def _model_short(model: Optional[str]) -> str:
-    """Drop ``vendor/`` prefix (``openai/gpt-5.4`` → ``gpt-5.4``)."""
-    return model.rsplit("/", 1)[-1] if model else ""
+    """Drop ``vendor/`` prefix (``openai/gpt-5.4`` → ``gpt-5.4``), then apply
+    local display aliases (full model id -> compact footer label)."""
+    if not model:
+        return ""
+    short = model.rsplit("/", 1)[-1]
+    return _FOOTER_MODEL_ALIASES.get(short, short)
 
 
 def _env_cwd() -> str:
