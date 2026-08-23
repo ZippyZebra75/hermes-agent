@@ -20,7 +20,10 @@ import pytest
 from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-from plugins.platforms.telegram.adapter import TelegramAdapter
+from plugins.platforms.telegram.adapter import (
+    TelegramAdapter,
+    _rich_normalize_linebreaks,
+)
 from telegram.error import BadRequest, NetworkError, TimedOut
 
 
@@ -844,3 +847,67 @@ async def test_rich_reply_records_and_recovers_text(monkeypatch, tmp_path):
     )
     assert event.reply_to_message_id == "678"
     assert event.reply_to_text == "Your morning briefing: CI is green."
+
+
+# ---------------------------------------------------------------------------
+# _rich_normalize_linebreaks: block regions must not get glued to prose
+# ---------------------------------------------------------------------------
+# A single-\n boundary before a protected region (table / code fence) used to
+# be converted into a Markdown hard break, so the region stayed inside the
+# previous paragraph. Telegram's rich renderer then fails to parse the pipe
+# table as a block and shows the raw '|' characters. The boundary must become
+# a paragraph break instead.
+
+
+def test_table_after_bold_heading_gets_paragraph_break():
+    """Table glued to the previous line is promoted to its own block."""
+    src = "**做了什么：**\n| 操作 | 对象 |\n|---|---|\n| a | b |"
+    out = _rich_normalize_linebreaks(src)
+    assert "**做了什么：**\n\n| 操作 | 对象 |\n|---|---|\n| a | b |" in out
+    # Table rows keep single newlines — no hard breaks inside the block.
+    assert "  |" not in out
+    assert "  \n| 操作" not in out
+
+
+def test_table_after_blank_line_untouched():
+    """A proper blank line before a table is left exactly as-is."""
+    src = "**head**\n\n| a | b |\n|---|---|"
+    out = _rich_normalize_linebreaks(src)
+    assert out == src
+
+
+def test_table_at_start_untouched():
+    """A table that opens the message needs no boundary promotion."""
+    src = "| a | b |\n|---|---|\n| 1 | 2 |"
+    assert _rich_normalize_linebreaks(src) == src
+
+
+def test_code_fence_after_line_gets_paragraph_break():
+    """Code fences are block regions too — same promotion as tables."""
+    src = "intro\n```\ncode\n```"
+    out = _rich_normalize_linebreaks(src)
+    assert out == "intro\n\n```\ncode\n```"
+
+
+def test_line_after_table_gets_paragraph_break():
+    """A line glued directly after the table's last row is separated."""
+    src = "| a | b |\n|---|---|\n| 1 | 2 |\n**next**"
+    out = _rich_normalize_linebreaks(src)
+    assert "| 1 | 2 |\n\n**next**" in out
+
+
+def test_real_cjk_table_with_code_cells_survives():
+    """The reported failure: CJK table with code spans after a bold line."""
+    src = (
+        "**全仓库构成：**\n"
+        "| 类别 | 行数 | 占产品代码 |\n"
+        "|---|---|---|\n"
+        "| `hermes_cli`（CLI/命令/配置系统） | 242,668 | 26.9% |\n"
+        "| **`tests/`（测试）** | **841,996** | 占全量 48.3% |\n"
+        "\n"
+        "**结论：**"
+    )
+    out = _rich_normalize_linebreaks(src)
+    assert "**全仓库构成：**\n\n| 类别 | 行数 | 占产品代码 |" in out
+    assert "| `hermes_cli`（CLI/命令/配置系统） | 242,668 | 26.9% |" in out
+    assert "| **`tests/`（测试）** | **841,996** | 占全量 48.3% |\n\n**结论：**" in out

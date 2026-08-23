@@ -300,17 +300,44 @@ _RICH_PROTECTED_REGION_RE = re.compile(
 
 
 def _rich_normalize_linebreaks(text: str) -> str:
-    """Convert lone ``\\n`` (a Markdown soft break) to hard breaks for sendRichMessage; ``\\n\\n``,
-    fenced code and pipe tables are left untouched."""
+    """Convert single ``\n`` to Markdown hard breaks for the rich-message path.
+
+    Standard Markdown treats a lone ``\n`` as whitespace (soft break), so
+    Bot API 10.1 ``sendRichMessage`` collapses multi-line content — e.g.
+    slash-command lists joined with ``"\n".join(lines)`` — into a single
+    paragraph.  Adding two trailing spaces before each single newline
+    forces a hard line break (``<br>``) in the rendered output.
+
+    Paragraph breaks (``\n\n``), fenced code blocks, and GFM pipe-table
+    blocks are left untouched: tables render natively in the rich path and a
+    hard break injected into a row separator would corrupt the table.  A
+    block region glued to the previous line (single-``\n`` boundary, e.g. a
+    table directly after ``**heading**``) is promoted to a paragraph break —
+    Telegram's rich renderer otherwise fails to parse the pipe table as a
+    block and shows the raw ``|`` characters.
+    """
     if not text or '\n' not in text:
         return text
     out: list[str] = []
     pos = 0
     for m in _RICH_PROTECTED_REGION_RE.finditer(text):
-        out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', text[pos:m.start()]))
+        prose = text[pos:m.start()]
+        # A block region glued to the previous line (single-\n boundary, e.g.
+        # a table directly after **heading**) must NOT get a Markdown hard
+        # break: Telegram's rich renderer then stops parsing the pipe table /
+        # code fence as its own block and shows raw '|' characters.  Promote
+        # the boundary to a paragraph break so the block stands alone.
+        if prose.endswith('\n') and not prose.endswith('\n\n'):
+            prose += '\n'
+        out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', prose))
         out.append(m.group(0))  # protected region kept verbatim
         pos = m.end()
-    out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', text[pos:]))
+    tail = text[pos:]
+    # Mirror case: a block region followed directly by a line — keep the
+    # paragraph break so the next line isn't glued to the block's last row.
+    if out and tail.startswith('\n') and not tail.startswith('\n\n'):
+        tail = '\n' + tail
+    out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', tail))
     return ''.join(out)
 
 
