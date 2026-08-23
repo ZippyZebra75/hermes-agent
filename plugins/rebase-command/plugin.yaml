@@ -1,0 +1,4 @@
+name: rebase-command
+version: 1.0.0
+description: "Slash command /rebase — fetch upstream and rebase the fork's local-patches branch onto upstream main."
+author: admin
