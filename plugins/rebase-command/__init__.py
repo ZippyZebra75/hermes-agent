@@ -33,6 +33,51 @@ def _run(args, timeout=180):
         return -1, "", str(exc)
 
 
+def _build_negotiation_report(remote, branch, conflicted_files, max_files=6):
+    """Per-file 'what upstream changed vs what my patches wanted', post-abort.
+
+    merge-base is computed AFTER ``git rebase --abort`` — HEAD is restored to
+    its pre-rebase state, so the divergence point is identical to the one the
+    rebase used. Presents three ways out (drop / merge / re-apply) without
+    auto-deciding: classifying a conflict requires knowing the local patch's
+    intent, which is a human (or agent) judgment, not a mechanical one.
+    """
+    _, base_out, _ = _run(["merge-base", "HEAD", f"{remote}/{branch}"])
+    base = base_out.strip()
+    if not base:
+        return "\n\n⚠️ 无法计算 merge-base，跳过协商报告。"
+    files = [f for f in conflicted_files if f.strip()][:max_files]
+    if not files:
+        return ""
+    parts = ["", "🧭 协商报告 — 上游改了什么 vs 我的 patch 要什么"]
+    for f in files:
+        parts += ["", f"📄 `{f}`"]
+        # ① upstream's change to this file since the divergence point.
+        _, ustat, _ = _run(["diff", "--stat", f"{base}..{remote}/{branch}", "--", f])
+        _, ulog, _ = _run(["log", "--oneline", f"{base}..{remote}/{branch}", "--", f])
+        ulines = [l.strip() for l in ulog.splitlines() if l.strip()][:4]
+        ustat_lines = ustat.strip().splitlines()
+        parts.append(
+            "  ① 上游改动：" + (f" `{ustat_lines[-1].strip()}`" if ustat_lines else " (无 stat)")
+        )
+        for l in ulines:
+            parts.append("     · " + l)
+        # ② my local patches touching this file.
+        _, mstat, _ = _run(["diff", "--stat", f"{base}..HEAD", "--", f])
+        _, mlog, _ = _run(["log", "--oneline", f"{base}..HEAD", "--", f])
+        mlines = [l.strip() for l in mlog.splitlines() if l.strip()][:4]
+        mstat_lines = mstat.strip().splitlines()
+        parts.append(
+            "  ② 我的 patch：" + (f" `{mstat_lines[-1].strip()}`" if mstat_lines else " (无 stat)")
+        )
+        for l in mlines:
+            parts.append("     · " + l)
+        parts.append("  ③ 取舍：丢（上游已覆盖用例）/ 合（取交集）/ 重打（无关重构）")
+    if len(conflicted_files) > max_files:
+        parts.append(f"  …另有 {len(conflicted_files) - max_files} 个文件，需要完整 diff 就说一声")
+    return "\n".join(parts)
+
+
 def _handle_rebase(raw_args=None) -> str:
     args = (raw_args or "").strip().split()
     remote = args[0] if len(args) > 0 else "upstream"
@@ -56,14 +101,39 @@ def _handle_rebase(raw_args=None) -> str:
     lines = [f"🔄 /rebase — `{remote}/{branch}` @ `{REPO}`", ""]
 
     # Step 1: track upstream.
+    # git fetch output only shows ref ranges (old..new), never a commit count —
+    # record the remote ref position before fetching so we can report how many
+    # commits the fetch actually brought in.
+    _, before, _ = _run(["rev-parse", "--verify", "--quiet", f"{remote}/{branch}"])
     code, out, err = _run(["fetch", remote])
     if code != 0:
         return (
             "\n".join(lines)
             + f"\n❌ `git fetch {remote}` 失败：\n```\n{(err or out).strip()[:1500]}\n```"
         )
+    _, after, _ = _run(["rev-parse", "--verify", "--quiet", f"{remote}/{branch}"])
+    fetched_n = ""
+    if after.strip():
+        if before.strip() and before.strip() != after.strip():
+            # Normal case: ref moved old..new — count commits in that range.
+            _, n, _ = _run(["rev-list", "--count", f"{before.strip()}..{after.strip()}"])
+            fetched_n = n.strip()
+        elif before.strip():
+            # Ref unchanged — nothing new to fetch.
+            fetched_n = "0"
+        else:
+            # First fetch of this ref (no pre-fetch position) — everything is new.
+            _, n, _ = _run(["rev-list", "--count", after.strip()])
+            fetched_n = n.strip()
     summary = " ".join(l.strip() for l in out.splitlines() if l.strip())
-    lines.append(f"✅ `git fetch {remote}` 完成" + (f" — {summary}" if summary else ""))
+    msg = f"✅ `git fetch {remote}` 完成"
+    if fetched_n and fetched_n != "0":
+        msg += f" — 抓取到 `{fetched_n}` 个 commit"
+    elif fetched_n == "0":
+        msg += " — 已是最新"
+    if summary:
+        msg += f" — {summary}"
+    lines.append(msg)
 
     # Step 2: rebase onto remote branch.
     code, out, err = _run(["rebase", f"{remote}/{branch}"])
@@ -86,13 +156,20 @@ def _handle_rebase(raw_args=None) -> str:
     conflicts = [
         l.strip() for l in (out + err).splitlines() if "CONFLICT" in l
     ]
+    # Conflicted files only exist as unmerged index entries mid-rebase —
+    # capture them BEFORE abort.
+    _, unmerged_out, _ = _run(["diff", "--name-only", "--diff-filter=U"])
+    conflicted_files = [l.strip() for l in unmerged_out.splitlines() if l.strip()]
     _run(["rebase", "--abort"])
     msg = "\n".join(lines) + f"\n❌ `git rebase {remote}/{branch}` 失败"
     if conflicts:
         msg += "，冲突：\n```\n" + "\n".join(conflicts[:15]) + "\n```"
     else:
         msg += f"：\n```\n{(err or out).strip()[:1500]}\n```"
-    return msg + "\n已执行 `git rebase --abort` 回滚，工作树保持原状。"
+    msg += "\n已执行 `git rebase --abort` 回滚，工作树保持原状。"
+    if conflicted_files or conflicts:
+        msg += _build_negotiation_report(remote, branch, conflicted_files)
+    return msg
 
 
 def register(ctx) -> None:
