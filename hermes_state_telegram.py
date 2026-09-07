@@ -46,7 +46,7 @@ _TOPIC_TABLES = (
     ),
     (
         "telegram_dm_topic_bindings",
-        "profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, linked_at, updated_at",
+        "profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, linked_at, updated_at, cwd",
         """
                     profile_name TEXT NOT NULL DEFAULT 'default',
                     chat_id TEXT NOT NULL,
@@ -57,6 +57,7 @@ _TOPIC_TABLES = (
                     managed_mode TEXT NOT NULL DEFAULT 'auto',
                     linked_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
+                    cwd TEXT,
                     PRIMARY KEY (profile_name, chat_id, thread_id)
                 """,
     ),
@@ -112,7 +113,8 @@ class SessionTelegramTopicsMixin:
         part of startup reconciliation: operators can upgrade and keep the old bot
         behavior until a user runs /topic. Schema versions: v1 initial; v2 session_id FK
         ON DELETE CASCADE (pruning clears bindings); v3 ``profile_name`` on both tables so
-        multiplexed gateways sharing one state.db isolate topic state per profile.
+        multiplexed gateways sharing one state.db isolate topic state per profile;
+        v4 ``cwd`` column on bindings (per-topic working-directory pin via /cwd).
 
         See #76423.
         """
@@ -132,6 +134,11 @@ class SessionTelegramTopicsMixin:
                     DROP TABLE {table};
                     ALTER TABLE {table}_new RENAME TO {table};
                     """)
+            # v4: add the per-topic cwd pin column on the bindings table (SQLite can
+            # ALTER in place; NULL cwd = topic falls back to the gateway-wide default).
+            have = {row[1] for row in conn.execute("PRAGMA table_info('telegram_dm_topic_bindings')")}
+            if "cwd" not in have:
+                conn.execute("ALTER TABLE telegram_dm_topic_bindings ADD COLUMN cwd TEXT")
             # Indexes after any rebuild: the user index needs profile_name.
             conn.executescript("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_session
@@ -143,7 +150,7 @@ class SessionTelegramTopicsMixin:
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                ("telegram_dm_topic_schema_version", "3"),
+                ("telegram_dm_topic_schema_version", "4"),
             )
         self._execute_write(_do)
 
@@ -326,6 +333,38 @@ class SessionTelegramTopicsMixin:
                     updated_at = excluded.updated_at
                 """, (profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, now, now))
         self._execute_write(_do)
+
+    def set_telegram_topic_cwd(
+        self, *, chat_id: str, thread_id: str, cwd: str, profile_name: str = "default",
+    ) -> None:
+        """Pin a working directory for one Telegram DM topic lane.
+
+        The binding row must already exist (created when the topic lane was
+        first opened). ``cwd`` is stored verbatim (absolute path expected);
+        an empty string clears the pin back to the gateway-wide default.
+        Rebinding the topic to a rotated session (``/new``) does NOT touch
+        this column — the pin survives session rotation.
+        """
+        self.apply_telegram_topic_migration()
+        now = time.time()
+        cwd = (cwd or "").strip()
+        profile_name = _normalize_telegram_topic_profile_name(profile_name)
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE telegram_dm_topic_bindings "
+                "SET cwd = ?, updated_at = ? "
+                "WHERE profile_name = ? AND chat_id = ? AND thread_id = ?",
+                (cwd or None, now, profile_name, str(chat_id), str(thread_id)),
+            )
+
+        self._execute_write(_do)
+
+    def clear_telegram_topic_cwd(
+        self, *, chat_id: str, thread_id: str, profile_name: str = "default",
+    ) -> None:
+        """Remove the cwd pin for one topic (falls back to global default)."""
+        self.set_telegram_topic_cwd(chat_id=chat_id, thread_id=thread_id, cwd="", profile_name=profile_name)
 
     def is_telegram_session_linked_to_topic(self, *, session_id: str) -> bool:
         """True if the session is bound to any Telegram DM topic (absent tables → False)."""

@@ -12,6 +12,7 @@ import dataclasses
 import logging
 import os
 import shlex
+from pathlib import Path
 from typing import Optional, Union
 
 from agent.i18n import t
@@ -725,6 +726,77 @@ class GatewaySessionCommandsMixin:
             title = None
         return t("gateway.topic.bound_status", label=title or t("gateway.topic.untitled_session"),
                  session_id=session_id)
+
+    # ------------------------------------------------------------------ /cwd
+
+    async def _handle_cwd_command(self, event: MessageEvent) -> str:
+        """Pin a working directory for this Telegram DM topic.
+
+        ``/cwd``            — show the current pin (or the global default)
+        ``/cwd <path>``     — pin this topic's session cwd to ``<path>``
+        ``/cwd off``        — clear the pin (back to global default)
+
+        The pin is stored on the topic binding row and survives ``/new``
+        (session rotation).  ``resolve_agent_cwd`` picks it up on every turn,
+        so terminal, file tools, AGENTS.md discovery and the system-prompt
+        cwd all follow it; topics without a pin keep the gateway-wide
+        ``TERMINAL_CWD`` default.
+        """
+        source = event.source
+        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
+            return t("gateway.topic.cwd_not_telegram_dm")
+        if not self._session_db:
+            from hermes_state import format_session_db_unavailable
+
+            return format_session_db_unavailable(
+                prefix=t("gateway.shared.session_db_unavailable_prefix")
+            )
+        auth_fn = getattr(self, "_is_user_authorized", None)
+        if callable(auth_fn):
+            try:
+                if not auth_fn(source):
+                    return t("gateway.topic.unauthorized")
+            except Exception:
+                logger.debug("cwd auth check failed", exc_info=True)
+        if not source.thread_id:
+            return t("gateway.topic.cwd_needs_topic")
+
+        rest = event.get_command_args().strip()
+        db = self._session_db  # AsyncSessionDB — every call is awaitable
+        profile_name = self._telegram_topic_profile_name(source)
+
+        if not rest or rest.lower() in {"show", "status"}:
+            binding = await db.get_telegram_topic_binding(
+                chat_id=str(source.chat_id),
+                thread_id=str(source.thread_id),
+                profile_name=profile_name,
+            )
+            pinned = ((binding or {}).get("cwd") or "").strip()
+            default = os.environ.get("TERMINAL_CWD", "").strip() or str(Path.home())
+            if pinned:
+                return t("gateway.topic.cwd_status", path=pinned, default=default)
+            return t("gateway.topic.cwd_status_none", default=default)
+
+        if rest.lower() in {"off", "clear", "unset", "delete", "remove"}:
+            await db.clear_telegram_topic_cwd(
+                chat_id=str(source.chat_id),
+                thread_id=str(source.thread_id),
+                profile_name=profile_name,
+            )
+            return t("gateway.topic.cwd_cleared")
+
+        path = os.path.expanduser(rest)
+        if not os.path.isabs(path):
+            return t("gateway.topic.cwd_requires_absolute")
+        if not os.path.isdir(path):
+            return t("gateway.topic.cwd_not_dir", path=path)
+        await db.set_telegram_topic_cwd(
+            chat_id=str(source.chat_id),
+            thread_id=str(source.thread_id),
+            cwd=path,
+            profile_name=profile_name,
+        )
+        return t("gateway.topic.cwd_set", path=path)
 
     # ------------------------------------------------------------------ /save, /title
 

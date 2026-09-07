@@ -4127,9 +4127,13 @@ class GatewayRunner(
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(self, context: SessionContext, cwd: Optional[str] = None) -> list:
         """Set session context variables (contextvars, not os.environ, so concurrent messages can't
-        overwrite each other). Returns reset tokens for ``_clear_session_env`` in a ``finally``."""
+        overwrite each other). Returns reset tokens for ``_clear_session_env`` in a ``finally``.
+
+        ``cwd`` optionally pins this session's logical working directory (e.g. a per-topic
+        ``/cwd`` binding). When None, the session keeps the global ``TERMINAL_CWD`` default.
+        """
         from gateway.session_context import set_session_vars
         # Async-delivery capability tells async tools whether this channel can wake a later turn. Default
         # True keeps CLI/unknown paths working; stateless adapters (api_server) declare False.
@@ -4150,7 +4154,8 @@ class GatewayRunner(
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
-            cron_session="")
+            cron_session="",
+            cwd=cwd or "")
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""

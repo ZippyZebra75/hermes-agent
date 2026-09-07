@@ -103,7 +103,7 @@ def _make_runner(adapter: CaptureSlackAdapter) -> gateway_run.GatewayRunner:
     runner._pending_approvals = {}
     runner._session_db = None
     runner._is_user_authorized = lambda _source: True
-    runner._set_session_env = lambda _context: None
+    runner._set_session_env = lambda _context, cwd=None: None
     runner._run_agent = AsyncMock(return_value=_make_incomplete_result())
     return runner
 

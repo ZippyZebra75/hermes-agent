@@ -1810,6 +1810,35 @@ class GatewayTurnMixin:
         )
         self._pop_post_delivery_callback(self._adapter_for_source(source), _quick_key, run_generation)
 
+    def _resolve_telegram_topic_cwd(self, source: SessionSource) -> Optional[str]:
+        """Return the per-topic cwd pin for a Telegram topic lane, else None.
+
+        A ``/cwd <path>`` pin (stored on the (chat_id, thread_id) binding row) makes this
+        session run from that directory — terminal, file tools, context-file discovery and
+        the system-prompt cwd all follow via ``resolve_agent_cwd``. None = topic uses the
+        global ``TERMINAL_CWD`` default (or launch dir).
+        """
+        if source.platform != Platform.TELEGRAM or not source.thread_id:
+            return None
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return None
+        # Runs off-loop (always via asyncio.to_thread); use the sync handle.
+        session_db = getattr(session_db, "_db", session_db)
+        profile_name = self._telegram_topic_profile_name(source)
+        try:
+            binding = session_db.get_telegram_topic_binding(
+                chat_id=str(source.chat_id),
+                thread_id=str(source.thread_id),
+                profile_name=profile_name,
+            )
+        except Exception:
+            return None
+        if not binding:
+            return None
+        cwd = (binding.get("cwd") or "").strip()
+        return cwd or None
+
     @dataclasses.dataclass
     class _PreparedTurn:
         """Inputs to the agent run assembled by ``_hmwa_prepare_turn``."""
@@ -1831,8 +1860,11 @@ class GatewayTurnMixin:
         from gateway.run import _load_gateway_config
         _was_auto_reset, _is_new_session = await self._hmwa_open_session(session_entry, session_key, source)
         context = build_session_context(source, self.config, session_entry)
-        # Session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        # Session context variables for tools (task-local, concurrency-safe). A per-topic
+        # cwd pin (/cwd <path>) makes this topic's session operate from that directory;
+        # absence keeps the global TERMINAL_CWD default.
+        _topic_cwd = self._resolve_telegram_topic_cwd(source)
+        _session_env_tokens = self._set_session_env(context, cwd=_topic_cwd)
         # Self-injected turns (MessageEvent(internal=True)) persist with a DB-only display_kind so
         # UIs render timeline notices, not user bubbles; role/content untouched.
         persist_user_display_kind = "internal_notification" if getattr(event, "internal", False) else None

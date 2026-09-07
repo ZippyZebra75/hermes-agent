@@ -388,6 +388,14 @@ gateway:
     bound_status:            "This topic is linked to:\nSession: {label}\nID: {session_id}\n\nUse /new to replace this topic with a fresh session.\nFor parallel work, open All Messages and send a message there to create another topic."
     thread_ready:            "Telegram multi-session topics are enabled.\n\nThis topic will be used as an independent Hermes session. Use /new to replace this topic's current session. For parallel work, open All Messages and send a message there to create another topic."
     untitled_session:        "Untitled session"
+    cwd_not_telegram_dm:     "/cwd is only available inside a Telegram private-chat topic."
+    cwd_needs_topic:         "Open or create a Telegram topic first, then send /cwd <path> inside it."
+    cwd_requires_absolute:   "The working directory must be an absolute path."
+    cwd_not_dir:             "Path does not exist or is not a directory: {path}"
+    cwd_set:                 "This topic is now pinned to: {path}\n\nTerminal, file tools, AGENTS.md discovery and the system-prompt cwd will run from here. Send `/cwd off` to return to the default."
+    cwd_cleared:             "Topic cwd pin cleared — this topic uses the default working directory again."
+    cwd_status:              "Topic working directory: {path}\n(default: {default})"
+    cwd_status_none:         "No cwd pin for this topic — using the default: {default}"
 
   undo:
     nothing:               "Nothing to undo."
