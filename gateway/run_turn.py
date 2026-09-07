@@ -1465,12 +1465,21 @@ class GatewayTurnMixin:
             # but the footer historically read the env directly (#cwd-pin).
             from agent.runtime_cwd import session_cwd_override as _scwd_override
             _footer_cwd = _scwd_override() or _terminal_scope_cwd("")
+            # ``turn_output_tokens`` is the per-turn output-token delta
+            # surfaced by run_turn_runner.py (session_completion_tokens now
+            # minus the pre-turn snapshot); pair it with the wall-clock
+            # _turn_seconds to feed the optional ``tps`` footer field
+            # (#26877).  Both kwargs are None-tolerant so the footer is
+            # unchanged for users who don't include ``tps`` in
+            # ``display.runtime_footer.fields``.
             return _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
                 cwd=_footer_cwd, turn_seconds=_turn_seconds,
+                response_tokens=int(agent_result.get("turn_output_tokens") or 0) or None,
+                elapsed_ms=_turn_seconds * 1000.0 if _turn_seconds else None,
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)

@@ -69,7 +69,16 @@ class TurnContext:
     tools_holder: list = field(default_factory=lambda: [None])
     stream_consumer_holder: list = field(default_factory=lambda: [None])
     streaming_tts_consumer_holder: list = field(default_factory=lambda: [None])
-    # voice-ack wiring
+
+    # Cumulative session-completion-token count observed right before this
+    # turn's ``run_conversation()``.  ``session_completion_tokens`` on the
+    # (possibly cached/reused) agent accumulates across turns, so the runtime
+    # footer's ``tps`` field must take a per-turn delta, not the raw session
+    # total.  Written by ``run_sync`` just before the conversation call,
+    # read by ``_run_agent_inner`` to compute the turn's output tokens (#26877).
+    turn_completion_tokens_start: int = 0
+
+    # --- voice-ack wiring --------------------------------------------------
     _voice_ack_fired: list = field(default_factory=lambda: [False])
     _voice_ack_guild: list = field(default_factory=lambda: [None])
     _voice_ack_loop: Any = None

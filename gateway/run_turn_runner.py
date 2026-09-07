@@ -1739,6 +1739,11 @@ class TurnRunner:
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
+        # Snapshot cumulative completion tokens for a per-turn tps delta in the
+        # runtime footer (#26877). The (cached) agent accumulates
+        # session_completion_tokens across turns, so the raw post-run value is
+        # a session total — the delta over this snapshot is this turn.
+        ctx.turn_completion_tokens_start = getattr(agent, "session_completion_tokens", 0) or 0
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
         self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
@@ -1753,6 +1758,8 @@ class TurnRunner:
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
             "output_tokens": getattr(agent, "session_completion_tokens", 0) if has_comp else 0,
+            "turn_output_tokens": max(0, (getattr(agent, "session_completion_tokens", 0) if has_comp else 0)
+                                      - (ctx.turn_completion_tokens_start or 0)),
             "model": getattr(agent, "model", None) if agent else None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
         }
