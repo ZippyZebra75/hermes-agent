@@ -218,7 +218,16 @@ class TurnRunner:
         ):
             return None, None
         cmd_full = args["command"].rstrip()
-        header = "" if self._ctx.last_was_terminal_block[0] else f"{emoji} {tool_name}\n"
+        if self._ctx.last_was_terminal_block[0]:
+            header = ""
+        elif self._ctx.progress_style == "italic":
+            # Italicize the header text (💻 terminal) while the fenced
+            # command below stays code.  Standard markdown *...* — the
+            # platform formatter converts it to native italic (Telegram
+            # MarkdownV2 _..._).
+            header = f"*{emoji} {tool_name}*\n"
+        else:
+            header = f"{emoji} {tool_name}\n"
         cap = self._preview_cap()
         lines = cmd_full.splitlines()
         cmd_short = lines[0] if lines else cmd_full
@@ -273,6 +282,25 @@ class TurnRunner:
         """Dedup consecutive identical lines (execute_code boilerplate), then route to the native
         stream bubble when the consumer accepts tool progress, else the progress queue."""
         ctx = self._ctx
+        # Optional cosmetic styling for progress breadcrumb text lines.
+        # Per-platform config (display.platforms.<platform>.tool_progress_style:
+        # italic) — wrap the human breadcrumb in standard markdown *italic*.
+        # The platform formatter converts it to its native syntax on every
+        # delivery path (Telegram format_message → MarkdownV2 _..._ for send,
+        # edit, draft stream, and the stream overlay).  Terminal messages are
+        # skipped here — their "💻 terminal" header is italicized at build
+        # time above while the fenced command stays code.  Lines whose
+        # preview contains a literal '*' are skipped so the italic
+        # conversion can't mis-pair markers.  Default "normal" leaves every
+        # platform unchanged.
+        if (
+            ctx.progress_style == "italic"
+            and msg
+            and "*" not in msg
+            and "\n" not in msg
+            and not ctx.last_was_terminal_block[0]
+        ):
+            msg = f"*{msg}*"
         sc = self._stream_consumer()
         native = sc is not None and getattr(sc, "accepts_tool_progress", False)
         if msg == ctx.last_progress_msg[0]:
