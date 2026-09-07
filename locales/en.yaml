@@ -394,7 +394,7 @@ gateway:
     cwd_not_dir:             "Path does not exist or is not a directory: {path}"
     cwd_set:                 "This topic is now pinned to: {path}\n\nTerminal, file tools, AGENTS.md discovery and the system-prompt cwd will run from here. Send `/cwd off` to return to the default."
     cwd_cleared:             "Topic cwd pin cleared — this topic uses the default working directory again."
-    cwd_status:              "Topic working directory: {path}\n(default: {default})"
+    cwd_status:              "Topic working directory: {path}"
     cwd_status_none:         "No cwd pin for this topic — using the default: {default}"
 
   undo:

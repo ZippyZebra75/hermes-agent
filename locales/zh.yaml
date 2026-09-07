@@ -381,7 +381,7 @@ Future messages in this room will use that transcript until `/reset` or another 
     cwd_not_dir:             "路径不存在或不是目录：{path}"
     cwd_set:                 "此 topic 已固定到：{path}\n\n终端、文件工具、AGENTS.md 发现和系统提示中的 cwd 都将从这里运行。发送 `/cwd off` 恢复默认。"
     cwd_cleared:             "已清除 topic 的 cwd 固定——此 topic 恢复使用默认工作目录。"
-    cwd_status:              "Topic 工作目录：{path}\n（默认：{default}）"
+    cwd_status:              "Topic 工作目录：{path}"
     cwd_status_none:         "此 topic 未固定 cwd——使用默认：{default}"
 
   undo:

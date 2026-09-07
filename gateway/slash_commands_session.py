@@ -774,7 +774,7 @@ class GatewaySessionCommandsMixin:
             pinned = ((binding or {}).get("cwd") or "").strip()
             default = os.environ.get("TERMINAL_CWD", "").strip() or str(Path.home())
             if pinned:
-                return t("gateway.topic.cwd_status", path=pinned, default=default)
+                return t("gateway.topic.cwd_status", path=pinned)
             return t("gateway.topic.cwd_status_none", default=default)
 
         if rest.lower() in {"off", "clear", "unset", "delete", "remove"}:
