@@ -44,6 +44,16 @@ def clear_session_cwd() -> None:
     _SESSION_CWD.set("")
 
 
+def session_cwd_override() -> str:
+    """Return the current per-session cwd override (a /cwd pin) or "" when unset.
+
+    The runtime footer reads this so it mirrors where tools actually run this
+    turn (resolve_agent_cwd honors the same _SESSION_CWD ContextVar first).
+    """
+    val = _SESSION_CWD.get()
+    return "" if val is _UNSET else str(val).strip()
+
+
 def scope_terminal_cwd() -> str:
     """Scope-aware TERMINAL_CWD value (may be empty) — every cwd consumer reads through this.
 

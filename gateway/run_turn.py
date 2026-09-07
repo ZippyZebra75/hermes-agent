@@ -1459,12 +1459,18 @@ class GatewayTurnMixin:
         from gateway.run import _load_gateway_config, _platform_config_key, _terminal_scope_cwd
         try:
             from gateway.runtime_footer import build_footer_line as _bfl
+            # The per-session cwd (a /cwd topic pin) wins over the global
+            # TERMINAL_CWD so the footer mirrors where the tools actually
+            # run this turn — resolve_agent_cwd already honors _SESSION_CWD,
+            # but the footer historically read the env directly (#cwd-pin).
+            from agent.runtime_cwd import session_cwd_override as _scwd_override
+            _footer_cwd = _scwd_override() or _terminal_scope_cwd("")
             return _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
-                cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
+                cwd=_footer_cwd, turn_seconds=_turn_seconds,
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)

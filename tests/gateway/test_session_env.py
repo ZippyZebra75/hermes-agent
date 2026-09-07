@@ -273,3 +273,37 @@ def test_cron_session_set_clear_and_reset_tristate(monkeypatch):
     reset_session_vars()
     assert get_session_env("HERMES_CRON_SESSION") == "1"
 
+
+def test_set_session_env_applies_cwd_override(tmp_path):
+    """_set_session_env(cwd=...) pins the session override read by resolve_agent_cwd
+    and the runtime footer (session_cwd_override), and clear restores it."""
+    from agent.runtime_cwd import (
+        clear_session_cwd,
+        resolve_agent_cwd,
+        session_cwd_override,
+    )
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="group",
+        user_id="123456",
+        thread_id="17585",
+    )
+    context = SessionContext(source=source, connected_platforms=[], home_channels={})
+
+    workdir = tmp_path / "projects" / "hermes"
+    workdir.mkdir(parents=True)
+
+    try:
+        tokens = runner._set_session_env(context, cwd=str(workdir))
+        assert str(resolve_agent_cwd()) == str(workdir)
+        # The runtime footer reads exactly this override to render its cwd
+        # field, so it must reflect the pin (and be cleared afterwards).
+        assert session_cwd_override() == str(workdir)
+    finally:
+        runner._clear_session_env(tokens)
+        clear_session_cwd()
+    assert session_cwd_override() == ""
+
