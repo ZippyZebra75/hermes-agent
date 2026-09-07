@@ -830,3 +830,35 @@ def test_get_telegram_topic_binding_by_session_returns_binding(tmp_path):
 # Test for session-split thread_id recovery (issue #27166)
 # ---------------------------------------------------------------------------
 
+
+def test_plain_group_cwd_pin_roundtrip_without_thread(tmp_path):
+    """A plain (non-forum) group has no thread_id — /cwd pins by chat_id alone.
+
+    Local patch: /cwd 放宽到 chat_id 级绑定，普通群组/频道（无 thread_id）
+    用空串作 thread_id key，读取侧同样用 (chat_id, "") 解析。
+    """
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.set_telegram_topic_cwd(
+        chat_id="-100987654", thread_id="", cwd="/srv/group-proj"
+    )
+    binding = db.get_telegram_topic_binding(chat_id="-100987654", thread_id="")
+    assert binding is not None
+    assert binding["cwd"] == "/srv/group-proj"
+
+    # runner 读取侧：无 thread_id 的普通群组也能解析到 pin
+    runner = _make_runner(session_db=db)
+    src = SessionSource(
+        platform=Platform.TELEGRAM,
+        user_id="208214988",
+        chat_id="-100987654",
+        user_name="tester",
+        chat_type="group",
+        thread_id=None,
+    )
+    assert runner._resolve_telegram_topic_cwd(src) == "/srv/group-proj"
+
+    # 清除 pin 后回到默认
+    db.clear_telegram_topic_cwd(chat_id="-100987654", thread_id="")
+    binding = db.get_telegram_topic_binding(chat_id="-100987654", thread_id="")
+    assert ((binding or {}).get("cwd") or "") == ""
+

@@ -337,25 +337,73 @@ class SessionTelegramTopicsMixin:
     def set_telegram_topic_cwd(
         self, *, chat_id: str, thread_id: str, cwd: str, profile_name: str = "default",
     ) -> None:
-        """Pin a working directory for one Telegram DM topic lane.
+        """Pin a working directory for one Telegram thread lane.
 
-        The binding row must already exist (created when the topic lane was
-        first opened). ``cwd`` is stored verbatim (absolute path expected);
-        an empty string clears the pin back to the gateway-wide default.
-        Rebinding the topic to a rotated session (``/new``) does NOT touch
-        this column — the pin survives session rotation.
+        Works for both DM topic lanes and group forum/reply threads. When no
+        binding row exists yet (e.g. a ``/cwd`` arriving as the lane's first
+        message), a backing session + binding row is created so the pin
+        sticks; the next inbound message refreshes session_key/session_id
+        via ``bind_telegram_topic`` without touching ``cwd``. ``cwd`` is
+        stored verbatim (absolute path expected); an empty string clears the
+        pin back to the gateway-wide default.
         """
         self.apply_telegram_topic_migration()
         now = time.time()
         cwd = (cwd or "").strip()
+        chat_id = str(chat_id)
+        thread_id = str(thread_id)
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
+
+        def _row_exists() -> bool:
+            with self._lock:
+                try:
+                    row = self._conn.execute(
+                        "SELECT 1 FROM telegram_dm_topic_bindings "
+                        "WHERE profile_name = ? AND chat_id = ? AND thread_id = ?",
+                        (profile_name, chat_id, thread_id),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    return False
+            return row is not None
+
+        if not _row_exists():
+            # Fresh lane whose first message is a command — commands
+            # short-circuit before the binding-record path. session_id is
+            # NOT NULL with an FK to sessions(id), so create a backing
+            # session too. Idempotent: a racing inbound message that bound
+            # the lane first makes these no-ops.
+            sid = f"thr-{chat_id}-{thread_id}"
+            session_key = f"agent:main:telegram:{chat_id}:{thread_id}"
+            try:
+                self.create_session(
+                    sid,
+                    source="telegram",
+                    user_id="",
+                    session_key=session_key,
+                    chat_id=chat_id,
+                    chat_type="group",
+                    thread_id=thread_id,
+                )
+            except Exception:
+                pass
+            try:
+                self.bind_telegram_topic(
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    user_id="",
+                    session_key=session_key,
+                    session_id=sid,
+                    profile_name=profile_name,
+                )
+            except Exception:
+                pass
 
         def _do(conn):
             conn.execute(
                 "UPDATE telegram_dm_topic_bindings "
                 "SET cwd = ?, updated_at = ? "
                 "WHERE profile_name = ? AND chat_id = ? AND thread_id = ?",
-                (cwd or None, now, profile_name, str(chat_id), str(thread_id)),
+                (cwd or None, now, profile_name, chat_id, thread_id),
             )
 
         self._execute_write(_do)

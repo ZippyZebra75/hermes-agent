@@ -1811,15 +1811,20 @@ class GatewayTurnMixin:
         self._pop_post_delivery_callback(self._adapter_for_source(source), _quick_key, run_generation)
 
     def _resolve_telegram_topic_cwd(self, source: SessionSource) -> Optional[str]:
-        """Return the per-topic cwd pin for a Telegram topic lane, else None.
+        """Return the per-topic cwd pin for a Telegram lane, else None.
 
-        A ``/cwd <path>`` pin (stored on the (chat_id, thread_id) binding row) makes this
-        session run from that directory — terminal, file tools, context-file discovery and
-        the system-prompt cwd all follow via ``resolve_agent_cwd``. None = topic uses the
+        Two key shapes (local patch, group cwd support):
+          - threaded lanes (DM topic / group forum thread) → (chat_id, thread_id)
+          - unthreaded chats (plain group/channel/flat DM) → (chat_id, "")
+
+        A ``/cwd <path>`` pin (stored on the binding row) makes this session run
+        from that directory — terminal, file tools, context-file discovery and the
+        system-prompt cwd all follow via ``resolve_agent_cwd``. None = chat uses the
         global ``TERMINAL_CWD`` default (or launch dir).
         """
-        if source.platform != Platform.TELEGRAM or not source.thread_id:
+        if source.platform != Platform.TELEGRAM:
             return None
+        thread_id = str(source.thread_id or "")
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
             return None
@@ -1829,7 +1834,7 @@ class GatewayTurnMixin:
         try:
             binding = session_db.get_telegram_topic_binding(
                 chat_id=str(source.chat_id),
-                thread_id=str(source.thread_id),
+                thread_id=thread_id,
                 profile_name=profile_name,
             )
         except Exception:
