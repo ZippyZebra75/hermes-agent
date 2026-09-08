@@ -2597,9 +2597,56 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._post_connect_task is asyncio.current_task():
                 self._post_connect_task = None
 
+    def _observe_forum_topic_icon_edit(self, update) -> None:
+        """Enroll/un-enroll a topic lane in idle-cleanup protection on USER icon edits.
+
+        Boss rule (2026-09-09): changing a topic's emoji icon in Telegram is the visual way to
+        add that lane to the protection list read by ``scripts/topic_cleanup.py`` (binding column
+        ``custom_logo_at``). Telegram exposes topic icons ONLY as live service-message pushes
+        (``forum_topic_created``/``forum_topic_edited``) — there is no Bot API to read the current
+        icon of an existing topic — so this group-99 observer is the only capture point.
+
+        Semantics of ``ForumTopicEdited.icon_custom_emoji_id`` (PTB): None = this edit did not
+        touch the icon (e.g. Hermes's own name-only renames); "" = icon removed back to the
+        default first-letter icon → clear protection; non-empty = user picked an emoji icon →
+        enroll. Best-effort, never raises into the update loop.
+        """
+        try:
+            message = getattr(update, "message", None)
+            topic_edit = getattr(message, "forum_topic_edited", None) if message is not None else None
+            if topic_edit is None:
+                return
+            if self._is_own_message(message):
+                return
+            chat = getattr(message, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            thread_id = getattr(message, "message_thread_id", None)
+            if chat_id is None or thread_id is None:
+                return
+            icon_id = getattr(topic_edit, "icon_custom_emoji_id", None)
+            if icon_id is None:
+                return
+            db = getattr(getattr(self, "_session_store", None), "_db", None)
+            if db is None or not hasattr(db, "set_telegram_topic_custom_logo"):
+                return
+            profile_name = getattr(self, "_hermes_profile_name", None) or "default"
+            db.set_telegram_topic_custom_logo(
+                chat_id=str(chat_id), thread_id=str(thread_id),
+                logo_at=(time.time() if icon_id else None),
+                profile_name=profile_name,
+            )
+            logger.info(
+                "[%s] Topic icon edit chat=%s thread=%s -> custom-logo protection=%s",
+                self.name, chat_id, thread_id, bool(icon_id))
+        except Exception:
+            logger.debug("[%s] forum_topic_edited icon observation failed", self.name, exc_info=True)
+
     async def _on_platform_update(self, update, context) -> None:
         """Catch-all PTB handler (group 99) firing ``gateway_platform_event`` per inbound update with a
         stable envelope (no raw SDK objects) and an internal auth source. Never raises into PTB."""
+        # Side-channel capture for service messages that no group-0 message handler matches
+        # (forum_topic_edited has no text/media). Runs for every update; the attr check is cheap.
+        self._observe_forum_topic_icon_edit(update)
         handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]] = getattr(self, "_platform_event_handler", None)
         if handler is None:
             return

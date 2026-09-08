@@ -46,7 +46,7 @@ _TOPIC_TABLES = (
     ),
     (
         "telegram_dm_topic_bindings",
-        "profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, linked_at, updated_at, cwd",
+        "profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, linked_at, updated_at, cwd, custom_logo_at",
         """
                     profile_name TEXT NOT NULL DEFAULT 'default',
                     chat_id TEXT NOT NULL,
@@ -58,6 +58,7 @@ _TOPIC_TABLES = (
                     linked_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     cwd TEXT,
+                    custom_logo_at REAL,
                     PRIMARY KEY (profile_name, chat_id, thread_id)
                 """,
     ),
@@ -114,7 +115,9 @@ class SessionTelegramTopicsMixin:
         behavior until a user runs /topic. Schema versions: v1 initial; v2 session_id FK
         ON DELETE CASCADE (pruning clears bindings); v3 ``profile_name`` on both tables so
         multiplexed gateways sharing one state.db isolate topic state per profile;
-        v4 ``cwd`` column on bindings (per-topic working-directory pin via /cwd).
+        v4 ``cwd`` column on bindings (per-topic working-directory pin via /cwd);
+        v5 ``custom_logo_at`` column on bindings (idle-cleanup protection: set when the user
+        edits the topic's emoji icon in Telegram — see scripts/topic_cleanup.py).
 
         See #76423.
         """
@@ -129,7 +132,7 @@ class SessionTelegramTopicsMixin:
                 # is nullable and never existed on legacy tables, so the rebuild copy must
                 # exclude it — the fresh DDL below already carries it, making the v4 ALTER a
                 # no-op, and legacy rows start unpinned (cwd NULL).
-                legacy_columns = columns.replace("profile_name, ", "", 1).replace(", cwd", "", 1)
+                legacy_columns = columns.replace("profile_name, ", "", 1).replace(", cwd", "", 1).replace(", custom_logo_at", "", 1)
                 conn.executescript(f"""
                     CREATE TABLE {table}_new ({ddl});
                     INSERT INTO {table}_new (profile_name, {legacy_columns})
@@ -142,6 +145,11 @@ class SessionTelegramTopicsMixin:
             have = {row[1] for row in conn.execute("PRAGMA table_info('telegram_dm_topic_bindings')")}
             if "cwd" not in have:
                 conn.execute("ALTER TABLE telegram_dm_topic_bindings ADD COLUMN cwd TEXT")
+            # v5: idle-cleanup protection marker — unix ts when the user last changed the topic's
+            # emoji icon (custom logo) in Telegram; NULL = default first-letter icon, deletable.
+            have = {row[1] for row in conn.execute("PRAGMA table_info('telegram_dm_topic_bindings')")}
+            if "custom_logo_at" not in have:
+                conn.execute("ALTER TABLE telegram_dm_topic_bindings ADD COLUMN custom_logo_at REAL")
             # Indexes after any rebuild: the user index needs profile_name.
             conn.executescript("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_session
@@ -153,7 +161,7 @@ class SessionTelegramTopicsMixin:
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                ("telegram_dm_topic_schema_version", "4"),
+                ("telegram_dm_topic_schema_version", "5"),
             )
         self._execute_write(_do)
 
@@ -416,6 +424,39 @@ class SessionTelegramTopicsMixin:
     ) -> None:
         """Remove the cwd pin for one topic (falls back to global default)."""
         self.set_telegram_topic_cwd(chat_id=chat_id, thread_id=thread_id, cwd="", profile_name=profile_name)
+
+    def set_telegram_topic_custom_logo(
+        self, *, chat_id: str, thread_id: str, logo_at: Optional[float] = None, profile_name: str = "default",
+    ) -> None:
+        """Enroll/un-enroll one DM topic binding in the idle-cleanup protection list.
+
+        Called by the Telegram adapter when a ``forum_topic_edited`` service message shows the
+        user changed the topic's emoji icon: non-None ``logo_at`` (a unix timestamp) means the
+        lane's icon is no longer the default first-letter icon, so the daily idle cleanup
+        (profile ``scripts/topic_cleanup.py``) must never delete it; ``logo_at=None`` clears the
+        marker when the user removes the icon back to default. Only touches existing bindings —
+        an unbound lane has nothing to protect (and no session to attach a marker to).
+        """
+        self.apply_telegram_topic_migration()
+        now = time.time()
+        chat_id = str(chat_id)
+        thread_id = str(thread_id)
+        profile_name = _normalize_telegram_topic_profile_name(profile_name)
+
+        def _do(conn):
+            cur = conn.execute(
+                "UPDATE telegram_dm_topic_bindings "
+                "SET custom_logo_at = ?, updated_at = ? "
+                "WHERE profile_name = ? AND chat_id = ? AND thread_id = ?",
+                (logo_at, now, profile_name, chat_id, thread_id),
+            )
+            if cur.rowcount == 0:
+                logger.info(
+                    "custom_logo marker skipped for chat %s thread %s: no binding row",
+                    chat_id, thread_id,
+                )
+
+        self._execute_write(_do)
 
     def is_telegram_session_linked_to_topic(self, *, session_id: str) -> bool:
         """True if the session is bound to any Telegram DM topic (absent tables → False)."""
