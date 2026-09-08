@@ -125,11 +125,14 @@ class SessionTelegramTopicsMixin:
                 if "profile_name" in have:
                     continue
                 # v1/v2 → v3. SQLite can't ALTER a PK or FK, so rebuild (also supplies v2's
-                # ON DELETE CASCADE). Legacy rows land in "default" only.
-                legacy_columns = columns.replace("profile_name, ", "", 1)
+                # ON DELETE CASCADE). Legacy rows land in "default" only. The v4 cwd column
+                # is nullable and never existed on legacy tables, so the rebuild copy must
+                # exclude it — the fresh DDL below already carries it, making the v4 ALTER a
+                # no-op, and legacy rows start unpinned (cwd NULL).
+                legacy_columns = columns.replace("profile_name, ", "", 1).replace(", cwd", "", 1)
                 conn.executescript(f"""
                     CREATE TABLE {table}_new ({ddl});
-                    INSERT INTO {table}_new ({columns})
+                    INSERT INTO {table}_new (profile_name, {legacy_columns})
                         SELECT 'default', {legacy_columns} FROM {table};
                     DROP TABLE {table};
                     ALTER TABLE {table}_new RENAME TO {table};
