@@ -862,3 +862,37 @@ def test_plain_group_cwd_pin_roundtrip_without_thread(tmp_path):
     binding = db.get_telegram_topic_binding(chat_id="-100987654", thread_id="")
     assert ((binding or {}).get("cwd") or "") == ""
 
+
+@pytest.mark.asyncio
+async def test_auto_title_skips_rename_when_topic_in_cleanup_whitelist(tmp_path):
+    """Local patch: 不自动删除白名单（custom-logo 保护）里的 thread 自动重命名跳过。
+
+    绑定行带 custom_logo_at（用户在 Telegram 里给话题设置了自定义 emoji 图标，
+    topic_cleanup.py 据此保留该 lane 不删除）→ 即使 session 匹配（llm 标题已生成），
+    也不改话题名：同一个保护手势同时保住名字不被自动命名反复覆盖。无标记时行为不变
+    （对照组见 test_auto_generated_title_renames_bound_telegram_topic）。
+    """
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.create_session("sess-custom-logo", source="telegram", user_id="208214988")
+    db.bind_telegram_topic(
+        chat_id="208214988",
+        thread_id="42",
+        user_id="208214988",
+        session_key="agent:main:telegram:dm:208214988:42",
+        session_id="sess-custom-logo",
+    )
+    db.set_telegram_topic_custom_logo(
+        chat_id="208214988", thread_id="42", logo_at=1234567890.0
+    )
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda source: True
+
+    await runner._rename_telegram_topic_for_session_title(
+        _make_source(thread_id="42"),
+        "sess-custom-logo",
+        "Build Telegram Topic UX",
+    )
+
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_not_awaited()
+

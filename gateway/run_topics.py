@@ -517,6 +517,12 @@ class GatewayTopicThreadsMixin:
                 )
                 if binding and str(binding.get("session_id") or "") != str(session_id):
                     return
+                # Idle-cleanup whitelist (topic_cleanup): a custom emoji icon set in Telegram
+                # marks an operator-managed lane (binding.custom_logo_at) that cleanup keeps.
+                # Auto-renaming would keep overwriting the name the operator chose for it — the
+                # same gesture that protects the lane from auto-delete protects its name too.
+                if binding and binding.get("custom_logo_at"):
+                    return
             except Exception:
                 logger.debug("Failed to verify Telegram topic binding before rename", exc_info=True)
                 return
