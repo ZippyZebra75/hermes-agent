@@ -145,10 +145,10 @@ class TestToolDetailsDraftIdentity:
         assert len(set(adapter.draft_ids)) == 1
 
 class TestToolDetailsSummary:
-    """Summary line contract: step count + elapsed time; the live head says 执行中."""
+    """Summary line contract: step count always, elapsed only on the final message."""
 
     @pytest.mark.asyncio
-    async def test_live_head_says_running_and_final_drops_it(self):
+    async def test_streaming_summary_differs_from_final_only_by_elapsed(self):
         adapter = _make_adapter()
         consumer = _make_consumer(adapter, tool_progress_details=True)
         task = asyncio.create_task(consumer.run())
@@ -158,13 +158,13 @@ class TestToolDetailsSummary:
 
         frames = [f for f in adapter.draft_calls if "<details" in f]
         assert frames, "expected streamed trace frames"
-        assert all(re.search(r"<summary>⚙️ 执行中 · 1 步</summary>", f) for f in frames)
+        assert all(re.search(r"<summary>⚙️ 执行 · 1 步</summary>", f) for f in frames)
 
         consumer.finish("答案。")
         await task
         final = adapter.sent[-1]
         assert re.search(r"<summary>⚙️ 执行 · 1 步 · \d+s</summary>", final)
-        assert "执行中" not in final
+        assert "执行中" not in "".join(frames) + final
 
     @pytest.mark.asyncio
     async def test_prose_only_summary_has_no_step_count(self):

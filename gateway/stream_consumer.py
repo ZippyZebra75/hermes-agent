@@ -63,7 +63,6 @@ _DEFAULT_BOUNDARY_PLACEHOLDER = "⏸ 等待审批中..."
 # One collapsed trace block (💭 思考 quotes + ⚙️ 执行 breadcrumbs, in real order) ahead of
 # the plain result text, which is NEVER folded.  Local patch.
 _EXEC_SUMMARY = "⚙️ 执行"
-_EXEC_RUNNING_SUMMARY = "⚙️ 执行中"  # streaming head; the final drops 中 (one live status word)
 _REASONING_SUMMARY = "💭 思考"  # trace-block summary when the turn only thought
 _TEXT_SUMMARY = "💬 说明"  # no tool calls, only inter-tool-call prose
 _REASONING_MAX_CHARS = 200  # per-segment cap on rendered thinking (Boss: long thinking delays)
@@ -425,8 +424,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         text_count = sum(1 for kind, _ in entries if kind == "text")
         reasoning_count = sum(1 for kind, _ in entries if kind == "reasoning")
         if tool_count:
-            head = _EXEC_RUNNING_SUMMARY if open_ else _EXEC_SUMMARY
-            summary = f"{head} · {tool_count} 步"
+            summary = f"{_EXEC_SUMMARY} · {tool_count} 步"
         elif text_count:
             summary = _TEXT_SUMMARY
         else:
