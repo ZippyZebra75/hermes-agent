@@ -1820,6 +1820,9 @@ class TurnRunner:
         # session_completion_tokens across turns, so the raw post-run value is
         # a session total — the delta over this snapshot is this turn.
         ctx.turn_completion_tokens_start = getattr(agent, "session_completion_tokens", 0) or 0
+        # Same snapshot for the tps denominator (bench-style decode window, #26877 follow-up).
+        ctx.turn_decode_seconds_start = getattr(agent, "session_decode_seconds", 0.0) or 0.0
+        ctx.turn_api_seconds_start = getattr(agent, "session_api_seconds", 0.0) or 0.0
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
         # Actual token counts from the agent instance used for this run.  Read BEFORE the stream
         # finalize: the runtime footer renders model/context%/tps from these, and the consumer
@@ -1833,6 +1836,13 @@ class TurnRunner:
             "output_tokens": getattr(agent, "session_completion_tokens", 0) if has_comp else 0,
             "turn_output_tokens": max(0, (getattr(agent, "session_completion_tokens", 0) if has_comp else 0)
                                       - (ctx.turn_completion_tokens_start or 0)),
+            # tps DENOMINATOR: this turn's share of the first→last streamed-delta window
+            # (bench-style decode phase).  Falls back to the turn's request time when the
+            # surface did not stream (no deltas to time) — see _hmwa_runtime_footer_line.
+            "turn_decode_seconds": max(0.0, (getattr(agent, "session_decode_seconds", 0.0) or 0.0)
+                                       - (ctx.turn_decode_seconds_start or 0.0)),
+            "turn_api_seconds": max(0.0, (getattr(agent, "session_api_seconds", 0.0) or 0.0)
+                                    - (ctx.turn_api_seconds_start or 0.0)),
             "model": getattr(agent, "model", None) if agent else None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
         }

@@ -3,7 +3,7 @@ minimal. Config: ``display.runtime_footer: {enabled: bool, fields: [model, conte
 (order shown; drop any to hide), per-platform override ``display.platforms.<p>.runtime_footer``,
 toggled by ``/footer on|off``. Fields: ``model`` (vendor prefix dropped), ``context_pct`` (last-call
 occupancy), ``latency`` (turn wall-clock, opt-in — NOT in the default set so an unset ``fields``
-renders exactly as before), ``tps`` (turn wall-clock tokens/sec, opt-in like ``latency``),
+renders exactly as before), ``tps`` (decode-phase tokens/sec — opt-in like ``latency``),
 ``cwd`` (home-relative). ``gateway/run.py`` appends the footer to the final response only (never to
 tool-progress or streaming partials); when streaming already delivered the text, it goes out as a
 trailing message via ``send_trailing_footer()``.
@@ -88,11 +88,13 @@ def _format_latency(seconds: float) -> str:
 def _format_tps(response_tokens: Optional[int], elapsed_ms: Optional[float]) -> str:
     """Render a ``tokens-per-second`` value as ``"NNt/s"`` or return ``""``.
 
-    Skipped silently when either input is missing or the elapsed window is too
-    short to give a meaningful rate (denominator approaches zero → wild
-    numbers like "12345t/s" on a 1ms async loop tick).  ``min_elapsed_ms``
-    floors at 50ms which corresponds to ~20 sample points / second — fine
-    granularity for the user-facing rate without divide-by-tiny noise.
+    ``elapsed_ms`` is the DECODE window — the caller sums each API call's first→last streamed
+    delta (bench-style decode phase, TTFT and tool time excluded).  Callers on surfaces that
+    do not stream pass the request time instead.  Skipped silently when either input is
+    missing or the window is too short to give a meaningful rate (denominator approaches zero
+    → wild numbers like "12345t/s" on a 1ms async loop tick).  ``min_elapsed_ms`` floors at
+    50ms which corresponds to ~20 sample points / second — fine granularity for the
+    user-facing rate without divide-by-tiny noise.
     """
     if not response_tokens or response_tokens <= 0:
         return ""
@@ -113,9 +115,10 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
     """Render the footer line, or "" if no fields have data. Fields whose data is missing (and
     unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots.
 
-    The ``tps`` field shows the wall-clock tokens-per-second for the just-finished turn
-    (response_tokens / elapsed_ms).  Callers without timing/usage data omit the optional
-    kwargs and ``tps`` renders nothing (same skip-silently rule)."""
+    The ``tps`` field shows the decode-phase tokens-per-second for the just-finished turn
+    (response_tokens / elapsed_ms, where ``elapsed_ms`` is the summed first→last streamed-delta
+    window).  Callers without timing/usage data omit the optional kwargs and ``tps`` renders
+    nothing (same skip-silently rule)."""
     def context_pct() -> str:
         if context_length and context_length > 0 and context_tokens >= 0:
             return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
@@ -141,7 +144,9 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
     to the final response themselves, preserving a single blank line of separation.
     ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
-    ``latency`` field. ``response_tokens`` + ``elapsed_ms`` feed the optional ``tps`` field."""
+    ``latency`` field. ``response_tokens`` + ``elapsed_ms`` feed the optional ``tps`` field
+    (``elapsed_ms`` = the turn's summed streamed-delta window; request time on non-streaming
+    surfaces)."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""

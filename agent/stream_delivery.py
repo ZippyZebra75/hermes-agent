@@ -6,6 +6,7 @@ Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO
 import logging
 import re
 import threading
+import time
 from typing import Any, Dict, List
 
 from agent.memory_manager import sanitize_context
@@ -282,6 +283,18 @@ class StreamDeliveryMixin:
     def _emit_stream_end(self, *, final_text: str, finished: bool, error: str | None) -> None:
         self._enqueue_stream_hook("on_stream_end", final_text=final_text, finished=finished, error=error)
 
+    def _note_decode_activity(self) -> None:
+        """Stamp the streaming decode window (first→last delta) for the footer's tps field.
+
+        The footer reports a bench-style decode rate, so its denominator must exclude TTFT
+        and tool time: each API call contributes only the span between its first and last
+        streamed delta (reasoning deltas count — they are generated tokens too).
+        ``turn_usage.record_response_usage`` folds the window once per call."""
+        now = time.monotonic()
+        if getattr(self, "_api_decode_started_at", None) is None:
+            self._api_decode_started_at = now
+        self._api_decode_last_at = now
+
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
         # A superseded stream must not interleave its tokens alongside the retry that replaced it.
@@ -310,6 +323,7 @@ class StreamDeliveryMixin:
                 text = text.lstrip("\n")
         if not text:
             return
+        self._note_decode_activity()
         delivered = self._deliver_to_stream_callbacks(text)
         self._enqueue_stream_hook("on_stream_delta", delta=text, kind="text")
         if delivered:
@@ -322,6 +336,8 @@ class StreamDeliveryMixin:
             # content deltas.
             self._note_dropped_stream_writer("_fire_reasoning_delta")
             return
+        if text:
+            self._note_decode_activity()
         self._call_quietly(self.reasoning_callback, text)
         try:
             from agent.plugin_stream_hooks import stream_reasoning_deltas_enabled

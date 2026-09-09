@@ -391,6 +391,11 @@ class AIAgent(
             "session_reasoning_tokens", "session_api_calls",
         ):
             setattr(self, counter, 0)
+        # Streaming timing counters (footer tps denominator + its request-time fallback).
+        self.session_decode_seconds = 0.0
+        self.session_api_seconds = 0.0
+        self._api_decode_started_at = None
+        self._api_decode_last_at = None
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"

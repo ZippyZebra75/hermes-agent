@@ -1467,11 +1467,17 @@ class GatewayTurnMixin:
             _footer_cwd = _scwd_override() or _terminal_scope_cwd("")
             # ``turn_output_tokens`` is the per-turn output-token delta
             # surfaced by run_turn_runner.py (session_completion_tokens now
-            # minus the pre-turn snapshot); pair it with the wall-clock
-            # _turn_seconds to feed the optional ``tps`` footer field
-            # (#26877).  Both kwargs are None-tolerant so the footer is
-            # unchanged for users who don't include ``tps`` in
+            # minus the pre-turn snapshot); pair it with the turn's
+            # first→last streamed-delta window (``turn_decode_seconds``,
+            # bench-style decode phase) to feed the optional ``tps`` footer
+            # field (#26877).  Surfaces that did not stream have no delta
+            # window — fall back to the turn's request time
+            # (``turn_api_seconds``).  All kwargs are None-tolerant so the
+            # footer is unchanged for users who don't include ``tps`` in
             # ``display.runtime_footer.fields``.
+            _decode_seconds = float(agent_result.get("turn_decode_seconds") or 0.0)
+            if _decode_seconds <= 0:
+                _decode_seconds = float(agent_result.get("turn_api_seconds") or 0.0)
             _line = _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
@@ -1479,7 +1485,7 @@ class GatewayTurnMixin:
                 context_length=agent_result.get("context_length") or None,
                 cwd=_footer_cwd, turn_seconds=_turn_seconds,
                 response_tokens=int(agent_result.get("turn_output_tokens") or 0) or None,
-                elapsed_ms=_turn_seconds * 1000.0 if _turn_seconds else None,
+                elapsed_ms=_decode_seconds * 1000.0 if _decode_seconds else None,
             )
             # Monospace footer (local patch): the metadata rides the turn-final message as an
             # inline code span, so it renders mono instead of blending into the answer body.

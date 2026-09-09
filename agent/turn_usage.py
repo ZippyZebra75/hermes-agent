@@ -63,6 +63,28 @@ def _fold_moa_usage(agent, canonical_usage):
     return _moa_client, canonical_usage, _moa_ref_cost
 
 
+def _fold_decode_window(agent: Any, api_duration: float) -> float:
+    """Fold one completed API attempt's streaming timing into the session counters.
+
+    ``session_api_seconds`` accumulates every attempt's request time — the tps fallback for
+    surfaces that do not stream.  ``session_decode_seconds`` accumulates only the first→last
+    streamed-delta window stamped by ``StreamDeliveryMixin._note_decode_activity`` — the
+    bench-style decode denominator (excludes TTFT and tool time).  The per-call window is
+    cleared either way so a usage-less attempt cannot bleed into the next call's window.
+    Returns the folded window in seconds (0.0 when the call streamed no usable span).
+    """
+    agent.session_api_seconds += float(api_duration or 0.0)
+    started = getattr(agent, "_api_decode_started_at", None)
+    last = getattr(agent, "_api_decode_last_at", None)
+    window = 0.0
+    if started is not None and last is not None and last - started > 0.001:
+        window = last - started
+        agent.session_decode_seconds += window
+    agent._api_decode_started_at = None
+    agent._api_decode_last_at = None
+    return window
+
+
 def record_response_usage(
     agent: Any, response: Any, *, messages: List[Dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
@@ -85,6 +107,7 @@ def record_response_usage(
         _note_usage_less = getattr(compressor, "note_usage_less_response", None)
         if callable(_note_usage_less):
             _note_usage_less()
+        _fold_decode_window(agent, api_duration)
         logger.info(
             "API call #%d: model=%s provider=%s in=? out=? total=? latency=%.1fs usage=unavailable",
             agent.session_api_calls, agent.model, agent.provider or "unknown", api_duration,
@@ -171,6 +194,7 @@ def record_response_usage(
     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+    _decode_window = _fold_decode_window(agent, api_duration)
     # Rolling history for status-bar averages (last 10).
     with suppress(Exception):
         hist = getattr(agent, "_api_latency_history", None)
@@ -189,6 +213,10 @@ def record_response_usage(
     # because none of the three were on this line.
     if canonical_usage.cache_write_tokens:
         _cache_pct += f" write={canonical_usage.cache_write_tokens}"
+    # decode= is the footer's tps denominator for this call (first→last streamed delta);
+    # appended so existing prefix parsers keep working.
+    if _decode_window > 0:
+        _cache_pct += f" decode={_decode_window:.1f}s"
     _rid = getattr(response, "id", None)
     _ident = f" id={_rid}" if isinstance(_rid, str) and _rid else ""
     _upstream = getattr(response, "provider", None)

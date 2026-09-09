@@ -2136,6 +2136,14 @@ _USAGE_STATE: Dict[str, Any] = {
     "session_cache_read_tokens": 0,
     "session_cache_write_tokens": 0,
     "session_reasoning_tokens": 0,
+    # Footer tps denominator (bench-style decode phase): the sum of each API call's
+    # first→last streamed-delta window, stamped by _note_decode_activity and folded by
+    # agent.turn_usage.  session_api_seconds is the per-call request-time fallback for
+    # surfaces without streaming (no deltas to time).
+    "session_decode_seconds": 0.0,
+    "session_api_seconds": 0.0,
+    "_api_decode_started_at": None,
+    "_api_decode_last_at": None,
     "session_estimated_cost_usd": 0.0,
     "session_cost_status": "unknown",
     "session_cost_source": "none",

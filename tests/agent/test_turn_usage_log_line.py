@@ -64,3 +64,20 @@ def test_forensics_parser_reads_the_new_fields(tmp_path):
     assert [c["n"] for c in calls] == [3, 4]
     assert calls[0]["write"] == 28604 and calls[0]["id"] == "gen-1788636728-qMa1" and calls[0]["upstream"] == "Claude Platform on AWS"
     assert "write" not in calls[1] and "id" not in calls[1]
+
+
+def test_decode_window_is_logged_and_folded(tmp_path, monkeypatch, caplog):
+    """The per-call decode window (footer tps denominator) rides the same line and folds
+    into the session counter; the per-call stamp is cleared so it cannot leak forward."""
+    a = _agent(tmp_path, monkeypatch)
+    try:
+        a._api_decode_started_at, a._api_decode_last_at = 10.0, 12.5
+        line = _line(a, caplog, SimpleNamespace(usage=_usage(0, 0, 100), id=None,
+                                                model="anthropic/claude-fable-5.1"))
+    finally:
+        a.close()
+
+    assert " decode=2.5s" in line
+    assert a.session_decode_seconds == 2.5
+    assert a.session_api_seconds == 0.2
+    assert a._api_decode_started_at is None and a._api_decode_last_at is None

@@ -657,9 +657,10 @@ class TestFooterNotSentTwice:
 class TestStreamFooterCarriesUsage:
     """The streamed footer is built BEFORE the runner's usage-merged return dict exists, so its
     source must merge the post-run usage itself — live bug: the sealed message showed only
-    ``model · 3s · ~`` (no context %, no tps)."""
+    ``model · 3s · ~`` (no context %, no tps).  The tps denominator is the bench-style decode
+    window (first→last streamed delta), with request time as the non-streaming fallback."""
 
-    def test_footer_source_merges_post_run_usage(self, monkeypatch):
+    def _line(self, monkeypatch, result, usage, seconds=3.4):
         import gateway.run as gateway_run
         from gateway.config import Platform
         from gateway.run_turn import GatewayTurnMixin
@@ -669,13 +670,27 @@ class TestStreamFooterCarriesUsage:
             "display": {"runtime_footer": {"enabled": True,
                                            "fields": ["model", "context_pct", "tps"]}}})
         monkeypatch.setattr(gateway_run, "_terminal_scope_cwd", lambda *a, **k: "")
+        return GatewayTurnMixin._hmwa_runtime_footer_line(
+            SimpleNamespace(), TurnRunner._footer_source(result, usage),
+            SimpleNamespace(platform=Platform.TELEGRAM), seconds)
 
+    def test_footer_source_merges_post_run_usage(self, monkeypatch):
         # Shape of the agent result the footer is built from mid-run: model + prompt tokens only.
+        result = {"model": "gpt-5.4", "last_prompt_tokens": 40_000}
+        usage = {"last_prompt_tokens": 40_000, "context_length": 100_000, "turn_output_tokens": 500,
+                 "turn_decode_seconds": 2.5, "turn_api_seconds": 3.4}
+
+        assert self._line(monkeypatch, result, usage) == "`gpt-5.4 · 40% · 200t/s`"
+
+    def test_tps_uses_request_time_when_nothing_streamed(self, monkeypatch):
+        result = {"model": "gpt-5.4", "last_prompt_tokens": 40_000}
+        usage = {"last_prompt_tokens": 40_000, "context_length": 100_000, "turn_output_tokens": 500,
+                 "turn_api_seconds": 2.5}
+
+        assert self._line(monkeypatch, result, usage) == "`gpt-5.4 · 40% · 200t/s`"
+
+    def test_tps_hidden_without_any_timing(self, monkeypatch):
         result = {"model": "gpt-5.4", "last_prompt_tokens": 40_000}
         usage = {"last_prompt_tokens": 40_000, "context_length": 100_000, "turn_output_tokens": 500}
 
-        line = GatewayTurnMixin._hmwa_runtime_footer_line(
-            SimpleNamespace(), TurnRunner._footer_source(result, usage),
-            SimpleNamespace(platform=Platform.TELEGRAM), 3.4)
-
-        assert line == "`gpt-5.4 · 40% · 147t/s`"
+        assert self._line(monkeypatch, result, usage) == "`gpt-5.4 · 40%`"

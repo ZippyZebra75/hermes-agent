@@ -81,6 +81,13 @@ class TurnContext:
     # total.  Written by ``run_sync`` just before the conversation call,
     # read by ``_run_agent_inner`` to compute the turn's output tokens (#26877).
     turn_completion_tokens_start: int = 0
+    # Same snapshot pattern for the tps DENOMINATOR: ``session_decode_seconds`` is the sum
+    # of each API call's first→last streamed-delta window (bench-style decode phase);
+    # ``session_api_seconds`` is the request-time fallback for non-streaming surfaces.
+    # Both accumulate on the cached agent across turns, so the footer needs the per-turn
+    # delta (see _footer_source / _hmwa_runtime_footer_line).
+    turn_decode_seconds_start: float = 0.0
+    turn_api_seconds_start: float = 0.0
 
     # --- voice-ack wiring --------------------------------------------------
     _voice_ack_fired: list = field(default_factory=lambda: [False])
