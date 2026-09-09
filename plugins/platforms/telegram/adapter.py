@@ -1253,24 +1253,12 @@ class TelegramAdapter(BasePlatformAdapter):
         r"\\(?:sum|frac|alpha|beta|gamma|delta|theta|lambda|mu|pi|sigma|"
         r"int|prod|sqrt|lim|infty|begin\{(?:equation|align|matrix|cases)\}))",
         re.IGNORECASE | re.DOTALL)
-    # Hiragana/Katakana, CJK Ext A, CJK Unified, Hangul, CJK Compatibility, CJK ext/compat supplement.
-    _RICH_CJK_RE = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\U00020000-\U000323af]")
-
     def _has_telegram_desktop_details_math_crash_shape(self, content: str) -> bool:
         """Math inside <details> crashes Telegram Desktop 6.9.1 (tdesktop#30808); the Bot API accepts
         the payload, so rich delivery must be skipped up front."""
         if not content:
             return False
         return any(self._RICH_MATH_IN_DETAILS_RE.search(block) for block in self._RICH_DETAILS_RE.findall(content))
-
-    def _has_telegram_desktop_cjk_rich_garble_shape(self, content: str) -> bool:
-        """True for CJK content: Telegram Mac/Desktop rich rendering leaves overlapping glyphs.
-
-        Telegram Mac/Desktop Bot API 10.1 rich-message rendering currently leaves overlapping draft/overlay
-        glyph artifacts for CJK text (#47653). The legacy MarkdownV2 path renders the same text cleanly, so
-        skip rich delivery up front until affected clients age out.
-        """
-        return bool(content and self._RICH_CJK_RE.search(content))
 
     def _needs_rich_rendering(self, content: str) -> bool:
         """True for constructs MarkdownV2 degrades: pipe tables, task lists, <details>, block math.
@@ -1518,6 +1506,13 @@ class TelegramAdapter(BasePlatformAdapter):
             and not getattr(self, "_rich_send_disabled", False)
             and not getattr(self, "_rich_draft_disabled", False)
             and self._bot_supports_rich())
+
+    def rich_send_available(self) -> bool:
+        """True when a persisted final can go out as a rich message (rich SENDS only).
+
+        Distinct from ``tool_details_supported()``, which also needs rich DRAFTS: the
+        collected trace block must still ride the final after a draft failure."""
+        return self._rich_transport_available()
 
     def tool_details_block_ok(self, details_markdown: str) -> bool:
         """False when a tool-details block would trip the Telegram Desktop math-in-details

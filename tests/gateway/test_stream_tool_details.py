@@ -33,6 +33,7 @@ def _make_adapter(*, supports_draft: bool = True, details_supported=True, block_
 
     adapter.tool_details_supported = lambda: details_supported
     adapter.tool_details_block_ok = lambda block: block_ok
+    adapter.rich_send_available = lambda: True
 
     def _supports(chat_type=None, metadata=None):
         return bool(supports_draft) and (chat_type or "").lower() == "dm"
@@ -157,7 +158,7 @@ class TestToolDetailsSummary:
 
         frames = [f for f in adapter.draft_calls if "<details" in f]
         assert frames, "expected streamed trace frames"
-        assert all(re.search(r"<summary>⚙️ 执行中 · 1 步 · \d+s</summary>", f) for f in frames)
+        assert all(re.search(r"<summary>⚙️ 执行中 · 1 步</summary>", f) for f in frames)
 
         consumer.finish("答案。")
         await task
@@ -184,11 +185,76 @@ class TestToolDetailsSummary:
 
         frames = [f for f in adapter.draft_calls if "<details" in f]
         assert frames and all(
-            re.search(r"<summary>💭 思考 · 1 段 · \d+s</summary>", f) for f in frames)
+            re.search(r"<summary>💭 思考 · 1 段</summary>", f) for f in frames)
 
         consumer.finish("答案。")
         await task
+        assert re.search(r"<summary>💭 思考 · 1 段 · \d+s</summary>", adapter.sent[-1])
 
+
+
+class TestToolDetailsDraftFailure:
+    """A mid-turn draft failure must not cost the persisted trace block: the final is a
+    rich SEND, which does not depend on the draft transport staying alive."""
+
+    @pytest.mark.asyncio
+    async def test_final_payload_keeps_trace_after_draft_failure(self):
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        consumer._use_draft_streaming = True
+        consumer._remember_detail("tool", "terminal: ls")
+        consumer._use_draft_streaming = False   # draft latched off by a send failure
+
+        assert consumer._tool_details_active() is False
+        await consumer._send_or_edit("答案。", finalize=True, is_turn_final=True)
+
+        final = adapter.sent[-1]
+        assert final.startswith("<details><summary>⚙️ 执行 · 1 步")
+        assert "terminal: ls" in final
+        assert final.rstrip().endswith("答案。")
+
+
+class TestToolDetailsDegrade:
+    """An oversized trace degrades entry-by-entry instead of vanishing (E3)."""
+
+    def test_oversized_trace_drops_oldest_entries_not_the_block(self):
+        adapter = _make_adapter()
+        adapter.tool_details_block_ok = lambda block: len(block) < 200
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        consumer._use_draft_streaming = True
+        for i in range(12):
+            consumer._remember_detail("tool", f"terminal: step-{i:02d}")
+
+        block = consumer._tool_details_block(open_=False)
+
+        assert block, "the trace must degrade, not vanish"
+        assert "…已省略更早的" in block
+        assert "step-11" in block        # newest kept
+        assert "step-00" not in block    # oldest dropped
+
+    @pytest.mark.asyncio
+    async def test_flush_tick_delivers_plain_text_not_the_trace(self):
+        """A flush tick is NOT interim, so it posts ``_accumulated`` without the trace
+        block — the block must not be duplicated into (or dropped from) the final."""
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.02)
+        consumer.on_tool_progress("terminal: ls")
+        await asyncio.sleep(0.08)
+        consumer.on_delta("先做一半。")
+        await asyncio.sleep(0.05)
+
+        assert await asyncio.to_thread(consumer.flush_pending_sync, 2.0) is True
+        await asyncio.sleep(0.05)
+        consumer.on_delta("继续。")
+        await asyncio.sleep(0.05)
+        consumer.finish("继续。")
+        await task
+
+        assert adapter.sent[0] == "先做一半。"
+        assert "terminal: ls" in adapter.sent[-1]
+        assert adapter.sent[-1].startswith("<details")
 
 
 class TestToolDetailsDelivery:
@@ -586,6 +652,21 @@ class TestToolDetailsFooter:
 
         assert consumer._delivered_final_text == "answer"
         assert consumer.delivered_final_matches("answer") is True
+
+    @pytest.mark.asyncio
+    async def test_fallback_continuation_marks_footer_owed(self):
+        """A fallback continuation bypasses the footer-carrying payload, so footer_taken
+        must report False and the gateway still delivers the footer as a trailing message."""
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        consumer.set_footer("`dsv4flash` · 12%")
+        consumer._accumulated = "答案。"
+        consumer._fallback_final_send = True
+
+        await consumer._send_fallback_final(consumer._accumulated)
+
+        assert adapter.sent and adapter.sent[-1] == "答案。"
+        assert consumer.footer_taken is False
 
     @pytest.mark.asyncio
     async def test_footer_rides_plain_message_when_details_off(self):

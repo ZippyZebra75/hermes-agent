@@ -94,6 +94,10 @@ class StreamFallbackMixin:
         # Balance fences BEFORE computing the continuation so the closing fence
         # reaches the user even when only the tail is delivered.
         final_text = ensure_closed_code_fences(self._clean_for_display(text))
+        # This continuation bypasses _final_payload (the only footer carrier): tell the
+        # gateway the footer is still owed so it goes out as a trailing message.
+        if self._footer_line and not final_text.rstrip().endswith(self._footer_line):
+            self._footer_missed = True
         continuation = self._continuation_text(final_text)
         self._fallback_final_send = False
         if not continuation.strip():
@@ -225,6 +229,8 @@ class StreamFallbackMixin:
         """Commit a completed answer after Telegram finalization fails: "delivered", "failed"
         (gateway may retry), "ambiguous" (a timeout may have landed) or "preview" (flood
         control; the complete preview is authoritative)."""
+        if self._footer_line and not (final_text or "").rstrip().endswith(self._footer_line):
+            self._footer_missed = True
         # Segment-scoped only: never delete an earlier finalized preamble.
         stale_ids = self._stale_preview_ids(segment_only=True)
         try:

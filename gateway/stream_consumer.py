@@ -186,6 +186,10 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # Runtime footer (model/context/latency): appended to the SAME turn-final message
         # instead of a trailing send (see set_footer).
         self._footer_line = ""
+        # A fallback continuation send bypasses _final_payload (the only footer carrier);
+        # set True there so footer_taken reports "not delivered" and the gateway still
+        # sends the footer as a trailing message.
+        self._footer_missed = False
         # Every reasoning segment is kept (interleaved thinking after tool calls included);
         # each segment is capped at _REASONING_MAX_CHARS, flagged here once the last
         # (still-growing) segment hit that cap.
@@ -301,6 +305,25 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             logger.debug("tool_details_supported probe raised", exc_info=True)
             return False
 
+    def _final_details_available(self) -> bool:
+        """Trace block for the PERSISTED final: needs rich SENDS, not a live draft stream.
+
+        A draft failure latches ``_use_draft_streaming`` off mid-turn, which turns
+        ``_tool_details_active()`` False even though the collected entries are still there
+        and the final goes out as a rich send — the trace must not vanish with the draft."""
+        if not bool(getattr(self.cfg, "tool_progress_details", False)):
+            return False
+        if self._tool_details_active():
+            return True
+        probe = getattr(self.adapter, "rich_send_available", None)
+        if not callable(probe):
+            return False
+        try:
+            return probe() is True
+        except Exception:
+            logger.debug("rich_send_available probe raised", exc_info=True)
+            return False
+
     def _remember_detail(self, kind: str, text: str) -> None:
         """Append one entry to the turn-scoped details log (capped).
 
@@ -316,7 +339,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         elif len(self._details_entries) == _TOOL_DETAILS_MAX_ENTRIES:
             # One overflow marker, then stop growing: the block is capped at
             # cap+1 entries (Telegram's rich-message block budget).
-            self._details_entries.append(("text", "…"))
+            self._details_entries.append(
+                ("note", f"…已达 {_TOOL_DETAILS_MAX_ENTRIES} 条记录上限，后续不再记录"))
 
     @staticmethod
     def _quote_reasoning(text: str) -> str:
@@ -391,13 +415,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         hours, minutes = divmod(minutes, 60)
         return f"{hours}h{minutes:02d}m"
 
-    def _tool_details_block(self, *, open_: bool) -> str:
-        """Collapsible ``<details>`` markdown for the collected execution trace (tool
-        breadcrumbs + interim prose), or "" when there is nothing to show / the adapter
-        cannot render the block safely (Desktop math-in-details guard, rich length cap)."""
-        entries = list(self._details_entries)
-        if not entries:
-            return ""
+    def _details_summary(self, entries: list[tuple[str, str]], *, open_: bool) -> str:
+        """One-line ``<summary>``: step count, plus elapsed once the turn is over.
+
+        The elapsed field is FINAL-only: it changes every tick and the summary sits at the
+        HEAD of the frame, so a live clock would make every draft frame non-prefix (the
+        client then re-renders the whole preview instead of fading in the new text)."""
         tool_count = sum(1 for kind, _ in entries if kind == "tool")
         text_count = sum(1 for kind, _ in entries if kind == "text")
         reasoning_count = sum(1 for kind, _ in entries if kind == "reasoning")
@@ -410,9 +433,14 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             summary = _REASONING_SUMMARY          # thinking-only trace
             if reasoning_count:
                 summary += f" · {reasoning_count} 段"
-        elapsed = self._elapsed_label()
-        if elapsed:
-            summary += f" · {elapsed}"
+        if not open_:
+            elapsed = self._elapsed_label()
+            if elapsed:
+                summary += f" · {elapsed}"
+        return summary
+
+    def _render_details_block(self, entries: list[tuple[str, str]], *, open_: bool) -> str:
+        """``<details>`` markdown for one entry list (summary + rendered body)."""
         # Consecutive tool breadcrumbs collapse into one bullet list; interim prose stays
         # paragraphs and the thinking renders as a blockquote, preserving real order.
         parts: list[str] = []
@@ -428,6 +456,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 bullets = []
             if kind == "reasoning":
                 parts.append(self._quote_reasoning(text))
+            elif kind == "note":
+                # Truncation markers are annotations, not prose.
+                parts.append(f"*{text}*")
             else:
                 parts.append(text)
         if bullets:
@@ -436,32 +467,39 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # Balance any orphan fence INSIDE the block (thinking/prose can be cut mid-code):
         # otherwise the whole-payload pass would append its close AFTER the answer.
         body = ensure_closed_code_fences(body)
-        block = (f"{'<details open>' if open_ else '<details>'}<summary>{summary}</summary>\n\n"
-                 f"{body}\n\n</details>")
+        summary = self._details_summary(entries, open_=open_)
+        return (f"{'<details open>' if open_ else '<details>'}<summary>{summary}</summary>\n\n"
+                f"{body}\n\n</details>")
+
+    def _tool_details_block(self, *, open_: bool) -> str:
+        """Collapsible trace block, or "" when there is nothing to show.
+
+        Degradation order — never lose the trace while a smaller version still renders:
+        full block → drop the quoted thinking (Desktop math-in-details guard) → drop the
+        OLDEST entries with a truncation note (rich length cap)."""
+        entries = list(self._details_entries)
+        if not entries:
+            return ""
+        block = self._render_details_block(entries, open_=open_)
         if self._details_block_ok(block):
             return block
         # The quoted thinking (or a tool line) tripped the Desktop math-in-details guard:
         # drop the thinking and keep the tool trace rather than losing the whole block.
         if any(kind == "reasoning" for kind, _ in entries):
-            parts = []
-            bullets = []
-            for kind, text in entries:
-                if kind == "reasoning":
-                    continue
-                if kind == "tool":
-                    bullets.append(f"- {text}")
-                    continue
-                if bullets:
-                    parts.append("\n".join(bullets))
-                    bullets = []
-                parts.append(text)
-            if bullets:
-                parts.append("\n".join(bullets))
-            tool_only_body = "\n\n".join(parts)
-            tool_only = (f"{'<details open>' if open_ else '<details>'}"
-                         f"<summary>{summary}</summary>\n\n{tool_only_body}\n\n</details>")
-            if self._details_block_ok(tool_only):
-                return tool_only
+            entries = [(kind, text) for kind, text in entries if kind != "reasoning"]
+            block = self._render_details_block(entries, open_=open_)
+            if self._details_block_ok(block):
+                return block
+        # Over the rich length cap: keep the most RECENT entries (what the user is waiting
+        # on) and say how many were dropped, instead of losing the whole block.
+        dropped = 0
+        while len(entries) > 1:
+            entries = entries[1:]
+            dropped += 1
+            note = ("note", f"…已省略更早的 {dropped} 条记录")
+            block = self._render_details_block([note] + entries, open_=open_)
+            if self._details_block_ok(block):
+                return block
         return ""
 
     def _details_block_ok(self, block: str) -> bool:
@@ -503,7 +541,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         Fences are pre-closed here so the later whole-payload pass is a no-op and the
         gateway's reconcile-edit path (which bypasses that pass) also gets balanced fences."""
         body = ensure_closed_code_fences(text)
-        if self._tool_details_active():
+        if self._final_details_available():
             blocks = self._tool_details_block(open_=False)
             if blocks:
                 body = f"{blocks}\n\n{body}" if body.strip() else blocks
@@ -680,8 +718,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
 
     @property
     def footer_taken(self) -> bool:
-        """True when a footer is queued to ride the turn-final message."""
-        return bool(self._footer_line)
+        """True when the footer rode a delivered turn-final message.
+
+        A fallback continuation (_send_fallback_final / _send_empty_fallback_final) does
+        not carry the footer, so it flips this to False and the gateway delivers the
+        footer as a trailing message instead of trusting a send that never had it."""
+        return bool(self._footer_line) and not self._footer_missed
 
     def on_reasoning(self, text: str) -> None:
         """Queue a model reasoning delta for the details block (no-op when it is inactive)."""
