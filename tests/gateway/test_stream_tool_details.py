@@ -640,3 +640,30 @@ class TestFooterNotSentTwice:
 
         assert adapter.send.await_count == 1
         assert adapter.send.await_args.args[1] == "`f`"
+
+
+class TestStreamFooterCarriesUsage:
+    """The streamed footer is built BEFORE the runner's usage-merged return dict exists, so its
+    source must merge the post-run usage itself — live bug: the sealed message showed only
+    ``model · 3s · ~`` (no context %, no tps)."""
+
+    def test_footer_source_merges_post_run_usage(self, monkeypatch):
+        import gateway.run as gateway_run
+        from gateway.config import Platform
+        from gateway.run_turn import GatewayTurnMixin
+        from gateway.run_turn_runner import TurnRunner
+
+        monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {
+            "display": {"runtime_footer": {"enabled": True,
+                                           "fields": ["model", "context_pct", "tps"]}}})
+        monkeypatch.setattr(gateway_run, "_terminal_scope_cwd", lambda *a, **k: "")
+
+        # Shape of the agent result the footer is built from mid-run: model + prompt tokens only.
+        result = {"model": "gpt-5.4", "last_prompt_tokens": 40_000}
+        usage = {"last_prompt_tokens": 40_000, "context_length": 100_000, "turn_output_tokens": 500}
+
+        line = GatewayTurnMixin._hmwa_runtime_footer_line(
+            SimpleNamespace(), TurnRunner._footer_source(result, usage),
+            SimpleNamespace(platform=Platform.TELEGRAM), 3.4)
+
+        assert line == "`gpt-5.4 · 40% · 147t/s`"

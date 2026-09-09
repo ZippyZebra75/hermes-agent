@@ -1604,6 +1604,15 @@ class TurnRunner:
                 clear_session(session_key)
             reset_current_session_key(token)
 
+    @staticmethod
+    def _footer_source(result, usage):
+        """Dict the runtime footer renders from: the agent result (``model``,
+        ``last_prompt_tokens``) merged with the post-run usage (``context_length`` for the
+        context %, ``turn_output_tokens`` for tps).  The streamed footer is built BEFORE the
+        runner's own usage-merged return dict exists, so without this merge the sealed
+        message carried a footer with no context usage and no tps."""
+        return {**result, **usage} if isinstance(result, dict) else dict(usage)
+
     def _finish_stream_consumer(self, result, agent_history, stream_consumer):
         ctx = self._ctx
         # Canonicalize a model-emitted computer-use screenshot path at the common result boundary so
@@ -1812,19 +1821,9 @@ class TurnRunner:
         # a session total — the delta over this snapshot is this turn.
         ctx.turn_completion_tokens_start = getattr(agent, "session_completion_tokens", 0) or 0
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
-        # Runtime footer rides the streamed turn-final message (no trailing send).
-        if stream_consumer is not None:
-            with suppress(Exception):
-                _footer = runner._hmwa_runtime_footer_line(
-                    result, ctx.source, time.monotonic() - _turn_started)
-                if _footer:
-                    stream_consumer.set_footer(_footer)
-        self._finish_stream_consumer(result, agent_history, stream_consumer)
-        # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
-        # returns, so early run_sync returns are also finalised.
-        # See the outer finally/completion section below. See #60671.
-        final_response = result.get("final_response")
-        # Actual token counts from the agent instance used for this run.
+        # Actual token counts from the agent instance used for this run.  Read BEFORE the stream
+        # finalize: the runtime footer renders model/context%/tps from these, and the consumer
+        # seals the turn-final message inside _finish_stream_consumer.
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
         comp = agent.context_compressor if has_comp else None
@@ -1837,6 +1836,18 @@ class TurnRunner:
             "model": getattr(agent, "model", None) if agent else None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
         }
+        # Runtime footer rides the streamed turn-final message (no trailing send).
+        if stream_consumer is not None:
+            with suppress(Exception):
+                _footer = runner._hmwa_runtime_footer_line(
+                    self._footer_source(result, usage), ctx.source, time.monotonic() - _turn_started)
+                if _footer:
+                    stream_consumer.set_footer(_footer)
+        self._finish_stream_consumer(result, agent_history, stream_consumer)
+        # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
+        # returns, so early run_sync returns are also finalised.
+        # See the outer finally/completion section below. See #60671.
+        final_response = result.get("final_response")
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)
         # failure_reason must survive the empty-response path too (TUI billing, transient-failure
         # persistence). compression_deferred (soft lock-contention defer) is distinct from
