@@ -1,6 +1,6 @@
 """Invariant tests for the opt-in collapsible trace (``tool_progress_details``).
 
-Contract: tool progress + every reasoning segment (each ≤200 chars, quoted) + inter-tool-call
+Contract: tool progress + every reasoning segment (each ≤120 chars, quoted) + inter-tool-call
 interim prose collect into ONE collapsed ``<details>`` block at the head of the turn-final
 message; the answer itself stays plain text below it (never wrapped in ``<details>``).
 While streaming the block lives in the draft frames and folds one-way once the answer starts.
@@ -175,7 +175,7 @@ class TestToolDetailsSummary:
         assert re.search(r"<summary>💬 说明 · \d+s</summary>", adapter.sent[-1])
 
     @pytest.mark.asyncio
-    async def test_thinking_only_summary_counts_segments(self):
+    async def test_thinking_only_summary_has_no_segment_count(self):
         adapter = _make_adapter()
         consumer = _make_consumer(adapter, tool_progress_details=True)
         task = asyncio.create_task(consumer.run())
@@ -185,11 +185,11 @@ class TestToolDetailsSummary:
 
         frames = [f for f in adapter.draft_calls if "<details" in f]
         assert frames and all(
-            re.search(r"<summary>💭 思考 · 1 段</summary>", f) for f in frames)
+            re.search(r"<summary>💭 思考</summary>", f) for f in frames)
 
         consumer.finish("答案。")
         await task
-        assert re.search(r"<summary>💭 思考 · 1 段 · \d+s</summary>", adapter.sent[-1])
+        assert re.search(r"<summary>💭 思考 · \d+s</summary>", adapter.sent[-1])
 
 
 
@@ -430,7 +430,7 @@ class TestToolDetailsDraftLiveness:
 
 class TestToolDetailsReasoning:
     """The thinking rides INSIDE the trace block as a blockquote: every reasoning segment is
-    kept (interleaved thinking after tool calls included), each hard-capped at 200 chars."""
+    kept (interleaved thinking after tool calls included), each hard-capped at 120 chars."""
 
     @pytest.mark.asyncio
     async def test_first_reasoning_segment_renders_as_quote(self):
@@ -477,7 +477,7 @@ class TestToolDetailsReasoning:
         assert final.index("中间说一句话。") < final.index("想第三步。")
 
     @pytest.mark.asyncio
-    async def test_each_reasoning_segment_capped_at_200_chars(self):
+    async def test_each_reasoning_segment_capped_at_120_chars(self):
         adapter = _make_adapter()
         consumer = _make_consumer(adapter, tool_progress_details=True)
         task = asyncio.create_task(consumer.run())
@@ -498,10 +498,10 @@ class TestToolDetailsReasoning:
         assert final.count("…") == 2
         start = final.index("> 💭 ") + len("> 💭 ")
         end = final.index("…", start)
-        assert final[start:end] == "字" * 200
+        assert final[start:end] == "字" * 120
         start2 = final.index("> 💭 ", end) + len("> 💭 ")
         end2 = final.index("…", start2)
-        assert final[start2:end2] == "乙" * 200
+        assert final[start2:end2] == "乙" * 120
 
     @pytest.mark.asyncio
     async def test_math_guard_drops_thinking_but_keeps_tool_trace(self):

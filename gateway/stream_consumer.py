@@ -65,7 +65,7 @@ _DEFAULT_BOUNDARY_PLACEHOLDER = "⏸ 等待审批中..."
 _EXEC_SUMMARY = "⚙️ 执行"
 _REASONING_SUMMARY = "💭 思考"  # trace-block summary when the turn only thought
 _TEXT_SUMMARY = "💬 说明"  # no tool calls, only inter-tool-call prose
-_REASONING_MAX_CHARS = 200  # per-segment cap on rendered thinking (Boss: long thinking delays)
+_REASONING_MAX_CHARS = 120  # per-segment cap on rendered thinking (long thinking delays)
 _TOOL_DETAILS_MAX_ENTRIES = 100  # cap on block entries (rich-message block budget)
 
 # Bot API drafts (sendMessageDraft / sendRichMessageDraft) are a ~30s ephemeral preview:
@@ -422,15 +422,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         client then re-renders the whole preview instead of fading in the new text)."""
         tool_count = sum(1 for kind, _ in entries if kind == "tool")
         text_count = sum(1 for kind, _ in entries if kind == "text")
-        reasoning_count = sum(1 for kind, _ in entries if kind == "reasoning")
         if tool_count:
             summary = f"{_EXEC_SUMMARY} · {tool_count} 步"
         elif text_count:
             summary = _TEXT_SUMMARY
         else:
             summary = _REASONING_SUMMARY          # thinking-only trace
-            if reasoning_count:
-                summary += f" · {reasoning_count} 段"
         if not open_:
             elapsed = self._elapsed_label()
             if elapsed:
