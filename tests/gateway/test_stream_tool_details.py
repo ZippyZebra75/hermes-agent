@@ -654,6 +654,50 @@ class TestFooterNotSentTwice:
         assert adapter.send.await_args.args[1] == "`f`"
 
 
+class TestToolBreadcrumbOneLine:
+    """A tool bullet must be ONE line.  Terminal progress arrives as a fenced block; a bullet
+    carrying a fence/newline breaks the list item and the italic header swallows the next
+    line (live format bug in the collapsed trace)."""
+
+    def test_fenced_terminal_breadcrumb_flattens_to_one_line(self):
+        from gateway.stream_consumer import GatewayStreamConsumer
+
+        text = ('*💻 terminal*\n```\ncd /root/.hermes/hermes-agent && grep -n "write=" '
+                'evals/postmortem/forensics/logcalls.py | head -25\n```')
+        line = GatewayStreamConsumer._breadcrumb_line(text)
+
+        assert "\n" not in line and "```" not in line
+        assert line.startswith("*💻 terminal* `") and line.endswith("`")
+
+    def test_single_line_breadcrumb_is_unchanged(self):
+        from gateway.stream_consumer import GatewayStreamConsumer
+
+        assert (GatewayStreamConsumer._breadcrumb_line("*🔧 Editing /root/x.py*")
+                == "*🔧 Editing /root/x.py*")
+
+    def test_backticks_in_command_cannot_close_the_code_span(self):
+        from gateway.stream_consumer import GatewayStreamConsumer
+
+        line = GatewayStreamConsumer._breadcrumb_line("*💻 terminal*\n```\necho `date`\n```")
+
+        assert line.count("`") == 2
+        assert "echo 'date'" in line
+
+    @pytest.mark.asyncio
+    async def test_terminal_breadcrumb_stays_one_line_in_the_block(self):
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        await _run_turn(
+            consumer,
+            ("tool", "*💻 terminal*\n```\ncd /root/x && ls\n```"),
+            ("text", "答案。"),
+        )
+
+        final = _final(adapter)
+        assert "- *💻 terminal* `cd /root/x && ls`" in final
+        assert "```\ncd /root/x && ls" not in final
+
+
 class TestStreamFooterCarriesUsage:
     """The streamed footer is built BEFORE the runner's usage-merged return dict exists, so its
     source must merge the post-run usage itself — live bug: the sealed message showed only

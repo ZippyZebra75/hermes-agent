@@ -351,6 +351,26 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._remember_detail("reasoning", text[:_REASONING_MAX_CHARS] + "…" if truncated else text)
         self._reasoning_capped = truncated
 
+    @staticmethod
+    def _breadcrumb_line(text: str) -> str:
+        """One-line bullet for a tool entry: fence lines dropped, newlines collapsed.
+
+        Terminal progress arrives as ``*💻 terminal*`` + a fenced command block.  A bullet
+        cannot carry a fence or a newline — the list item breaks and the italic header
+        swallows the following lines — so the trace shows the header and the command on one
+        line, with the command in inline code (keeps the mono look and stops a path like
+        ``logcalls.py`` from auto-linking).  Backticks inside the command would close that
+        span early, so they are shown as quotes (display only)."""
+        lines = [ln.strip() for ln in (text or "").splitlines()]
+        parts = [ln for ln in lines if ln and not ln.startswith("```")]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        header, cmd = parts[0], " ".join(parts[1:])
+        cmd = cmd.replace("`", "'")  # a backtick would close the inline-code span early
+        return f"{header} `{cmd}`"
+
     def _tool_details_block(self, *, open_: bool) -> str:
         """Collapsible ``<details>`` markdown for the collected execution trace (tool
         breadcrumbs + interim prose), or "" when there is nothing to show / the adapter
@@ -377,7 +397,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         bullets: list[str] = []
         for kind, text in entries:
             if kind == "tool":
-                bullets.append(f"- {text}")
+                line = self._breadcrumb_line(text)
+                if line:
+                    bullets.append(f"- {line}")
                 continue
             if bullets:
                 parts.append("\n".join(bullets))
