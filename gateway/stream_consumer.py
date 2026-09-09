@@ -47,6 +47,7 @@ _DONE = object()
 _NEW_SEGMENT = object()
 _COMMENTARY = object()
 _TOOL_PROGRESS = object()
+_REASONING = object()
 _FINAL_TEXT = object()
 _FLUSH = object()
 _APPROVAL_BOUNDARY = object()
@@ -55,6 +56,23 @@ _FUTURE_TYPES = (asyncio.Future, concurrent.futures.Future)
 
 # Boundary finalize text when nothing has accumulated yet (overridable per boundary).
 _DEFAULT_BOUNDARY_PLACEHOLDER = "⏸ 等待审批中..."
+
+# Opt-in collapsible tool-call block (display.platforms.<platform>.tool_progress_details):
+# tool progress + inter-tool-call interim text render as an EXPANDED <details> inside the
+# streaming frame, and the persisted final carries the same block COLLAPSED.  Local patch.
+# Three-section final message: 💭 思考 (own collapsed block) → ⚙️ 执行 (own collapsed
+# block) → result (plain text, NEVER folded).  Local patch.
+_EXEC_SUMMARY = "⚙️ 执行"
+_REASONING_SUMMARY = "💭 思考"  # own collapsible block; first segment only
+_REASONING_MAX_CHARS = 500  # hard cap on the rendered thinking (Boss: long thinking delays)
+_TOOL_DETAILS_RUNNING_SUFFIX = " · 正在执行…"
+_TOOL_DETAILS_MAX_ENTRIES = 100  # cap on block entries (rich-message block budget)
+
+# Bot API drafts (sendMessageDraft / sendRichMessageDraft) are a ~30s ephemeral preview:
+# re-send the current frame at this cadence while the turn is alive so a long tool run
+# (no text deltas) cannot let the preview expire mid-stream.  Verified: identical frames
+# are accepted repeatedly (no "not modified" rejection).
+_DRAFT_KEEPALIVE_SECONDS = 20.0
 
 
 @dataclass
@@ -74,6 +92,11 @@ class StreamConsumerConfig:
     # (progressive editMessageText).  "off" is handled by the gateway.
     transport: str = "edit"
     chat_type: str = ""  # originating chat type; gates platform-specific drafts
+    # Opt-in (display.platforms.<platform>.tool_progress_details): collect tool-progress
+    # lines into a collapsible <details> block — expanded in the streaming frame, collapsed
+    # in the persisted final — instead of separate progress bubbles.  Only activates when
+    # the adapter's tool_details_supported() probe returns True (Telegram rich drafts).
+    tool_progress_details: bool = False
 
 
 @dataclass
@@ -153,6 +176,18 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._current_edit_interval = self.cfg.edit_interval  # adaptive backoff
         self._delivered_commentary_texts: list[str] = []
         self._delivered_segment_texts: list[str] = []  # finalized text per past segment
+        # Turn-scoped log for the opt-in collapsible <details> block: ordered
+        # ("tool" | "text", payload) entries.  NOT cleared by text deltas (unlike the
+        # native overlay) and NOT reset per segment — the final message carries EVERY
+        # tool call and inter-tool-call interim text of the turn.
+        self._details_entries: list[tuple[str, str]] = []
+        # Runtime footer (model/context/latency): appended to the SAME turn-final message
+        # instead of a trailing send (see set_footer).
+        self._footer_line = ""
+        # Only the FIRST reasoning segment is kept (long thinking delays reading the reply);
+        # closed once any tool/prose entry lands, later reasoning deltas are dropped.
+        self._reasoning_closed = False
+        self._reasoning_truncated = False  # hit _REASONING_MAX_CHARS
         self._in_think_block = False  # think-tag filter state (mirrors CLI _stream_delta)
         self._think_buffer = ""
         self._before_finalize_notified = False
@@ -164,6 +199,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._use_draft_streaming = False
         self._draft_id: Optional[int] = None
         self._draft_failures = 0
+        self._last_draft_frame_at = 0.0  # keepalive clock (see _maybe_keepalive_draft)
         # TERMINAL authorization refusal for THIS RUN (see _send_draft_frame).
         # Per-run state, constructed fresh each turn, so a refusal can never
         # mute a healthy destination on a later turn.
@@ -234,18 +270,200 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
 
     @property
     def accepts_tool_progress(self) -> bool:
-        """True only when native streaming is active (gates in-stream tool progress)."""
-        return self._use_native_streaming
+        """True when tool-progress lines render INSIDE the streaming message — native
+        bubble, or the opt-in rich ``<details>`` block — instead of a separate message."""
+        return self._use_native_streaming or self._tool_details_active()
 
     def on_tool_progress(self, line: str) -> None:
         """Thread-safe: overlay a tool-progress line in the native bubble until the next delta."""
         if line:
             self._queue.put((_TOOL_PROGRESS, line))
 
+    def _tool_details_active(self) -> bool:
+        """True when tool progress should ride inside a collapsible rich block.
+
+        Requires the per-platform ``tool_progress_details`` opt-in, a LIVE stream
+        transport (native or draft — an edit-transport fallback has no frame to render
+        the block in), and an adapter probe confirming rich drafts + rich sends are
+        available.  ``probe() is True`` keeps MagicMock/legacy adapters out."""
+        if not bool(getattr(self.cfg, "tool_progress_details", False)):
+            return False
+        if not (self._use_native_streaming or self._use_draft_streaming):
+            return False
+        probe = getattr(self.adapter, "tool_details_supported", None)
+        if not callable(probe):
+            return False
+        try:
+            return probe() is True
+        except Exception:
+            logger.debug("tool_details_supported probe raised", exc_info=True)
+            return False
+
+    def _remember_detail(self, kind: str, text: str) -> None:
+        """Append one entry to the turn-scoped details log (capped).
+
+        ``kind`` is "tool" (a progress breadcrumb) or "text" (inter-tool-call interim
+        prose).  Separate from ``_tool_progress_lines`` because that list is the native
+        OVERLAY: real text clears it.  This one survives text deltas and segment breaks
+        so the persisted final carries the whole turn's execution trace."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if kind != "reasoning":
+            # First reasoning segment ends here; later thinking is dropped by design.
+            self._reasoning_closed = True
+        if len(self._details_entries) < _TOOL_DETAILS_MAX_ENTRIES:
+            self._details_entries.append((kind, text))
+        elif len(self._details_entries) == _TOOL_DETAILS_MAX_ENTRIES:
+            # One overflow marker, then stop growing: the block is capped at
+            # cap+1 entries (Telegram's rich-message block budget).
+            self._details_entries.append(("text", "…"))
+
+    @staticmethod
+    def _quote_reasoning(text: str) -> str:
+        """Render the thinking as a blockquote (visually inset from tools/prose)."""
+        lines = (text or "").splitlines() or [""]
+        out = [f"> 💭 {lines[0]}"]
+        out.extend(f"> {ln}" if ln.strip() else ">" for ln in lines[1:])
+        return "\n".join(out)
+
+    def _append_reasoning(self, text: str) -> None:
+        """Accumulate the FIRST reasoning segment only, hard-capped at
+        ``_REASONING_MAX_CHARS`` (long thinking delays reading the reply; later segments
+        are dropped entirely)."""
+        if not (text or "").strip() or self._reasoning_closed:
+            return
+        if self._details_entries and self._details_entries[-1][0] == "reasoning":
+            kind, prev = self._details_entries[-1]
+            room = _REASONING_MAX_CHARS - len(prev)
+            if room <= 0:
+                self._reasoning_truncated = True
+                return
+            if len(text) > room:
+                text = text[:room]
+                self._reasoning_truncated = True
+            self._details_entries[-1] = (kind, prev + text)
+        else:
+            if len(text) > _REASONING_MAX_CHARS:
+                text = text[:_REASONING_MAX_CHARS]
+                self._reasoning_truncated = True
+            self._remember_detail("reasoning", text)
+
+    def _tool_details_block(self, *, open_: bool) -> str:
+        """Collapsible ``<details>`` markdown for the collected execution trace (tool
+        breadcrumbs + interim prose), or "" when there is nothing to show / the adapter
+        cannot render the block safely (Desktop math-in-details guard, rich length cap)."""
+        entries = list(self._details_entries)
+        if not entries:
+            return ""
+        tool_count = sum(1 for kind, _ in entries if kind == "tool")
+        text_count = sum(1 for kind, _ in entries if kind == "text")
+        if not tool_count and not text_count:
+            summary = _REASONING_SUMMARY          # thinking-only trace
+        else:
+            bits = [_EXEC_SUMMARY]
+            if tool_count:
+                bits.append(f"{tool_count} 次工具调用")
+            if text_count:
+                bits.append(f"{text_count} 段说明")
+            summary = " · ".join(bits)
+        if open_:
+            summary += _TOOL_DETAILS_RUNNING_SUFFIX
+        # Consecutive tool breadcrumbs collapse into one bullet list; interim prose stays
+        # paragraphs and the thinking renders as a blockquote, preserving real order.
+        parts: list[str] = []
+        bullets: list[str] = []
+        for kind, text in entries:
+            if kind == "tool":
+                bullets.append(f"- {text}")
+                continue
+            if bullets:
+                parts.append("\n".join(bullets))
+                bullets = []
+            if kind == "reasoning":
+                parts.append(self._quote_reasoning(text + ("…" if self._reasoning_truncated else "")))
+            else:
+                parts.append(text)
+        if bullets:
+            parts.append("\n".join(bullets))
+        body = "\n\n".join(parts)
+        # Balance any orphan fence INSIDE the block (thinking/prose can be cut mid-code):
+        # otherwise the whole-payload pass would append its close AFTER the answer.
+        body = ensure_closed_code_fences(body)
+        block = (f"{'<details open>' if open_ else '<details>'}<summary>{summary}</summary>\n\n"
+                 f"{body}\n\n</details>")
+        if self._details_block_ok(block):
+            return block
+        # The quoted thinking (or a tool line) tripped the Desktop math-in-details guard:
+        # drop the thinking and keep the tool trace rather than losing the whole block.
+        if any(kind == "reasoning" for kind, _ in entries):
+            parts = []
+            bullets = []
+            for kind, text in entries:
+                if kind == "reasoning":
+                    continue
+                if kind == "tool":
+                    bullets.append(f"- {text}")
+                    continue
+                if bullets:
+                    parts.append("\n".join(bullets))
+                    bullets = []
+                parts.append(text)
+            if bullets:
+                parts.append("\n".join(bullets))
+            tool_only_body = "\n\n".join(parts)
+            tool_only = (f"{'<details open>' if open_ else '<details>'}"
+                         f"<summary>{summary}</summary>\n\n{tool_only_body}\n\n</details>")
+            if self._details_block_ok(tool_only):
+                return tool_only
+        return ""
+
+    def _details_block_ok(self, block: str) -> bool:
+        """Adapter probe: can this block render safely (Desktop math guard / rich cap)?"""
+        ok = getattr(self.adapter, "tool_details_block_ok", None)
+        if not callable(ok):
+            return True
+        try:
+            return ok(block) is True
+        except Exception:
+            logger.debug("tool_details_block_ok probe raised", exc_info=True)
+            return False
+
+    def _compose_details_blocks(self, *, open_: bool) -> str:
+        """The single trace block (thinking-as-quote + tools + interim prose).
+
+        While streaming it stays OPEN: whether the model's current text is the final answer
+        is unknowable until that response ends without tool calls, so there is no honest
+        mid-stream fold signal.  The turn-final payload (``open_=False``) collapses it."""
+        return self._tool_details_block(open_=open_)
+
     def _compose_frame_content(self) -> str:
-        """Native frame content: text, with any tool-progress lines below a rule."""
+        """Streaming frame content: the details blocks (when enabled) ahead of the text, else
+        the legacy text + ``---`` + overlay.  Blocks go FIRST so an unterminated code fence in
+        the answer is still closed after the text."""
+        if self._tool_details_active():
+            blocks = self._compose_details_blocks(open_=True)
+            if blocks:
+                return f"{blocks}\n\n{self._accumulated}" if self._accumulated.strip() else blocks
         progress = "\n".join(self._tool_progress_lines)
         return "\n\n---\n".join(p for p in (self._accumulated, progress) if p)
+
+    def _final_payload(self, text: str) -> str:
+        """Turn-final payload: the collapsed trace block ahead of the PLAIN answer.
+
+        Blocks come first so ``ensure_closed_code_fences`` still closes an unterminated
+        fence at the very end of the answer.  The answer is NEVER wrapped in ``<details>``
+        (avoids the fence-inside-block hazard and the Desktop math-in-details guard).
+        Fences are pre-closed here so the later whole-payload pass is a no-op and the
+        gateway's reconcile-edit path (which bypasses that pass) also gets balanced fences."""
+        body = ensure_closed_code_fences(text)
+        if self._tool_details_active():
+            blocks = self._tool_details_block(open_=False)
+            if blocks:
+                body = f"{blocks}\n\n{body}" if body.strip() else blocks
+        if self._footer_line:
+            body = f"{body}\n\n{self._footer_line}" if body.strip() else self._footer_line
+        return body
 
     def _metadata_for_send(self, *, final: bool = False, expect_edits: bool = False) -> dict | None:
         """Per-send metadata.  ``final`` → notify=True (Mattermost treats notify-worthy sends
@@ -309,6 +527,21 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         if record is not None:
             self._record_turn_final_payload(record)
 
+    def _strip_tool_details_block(self, text: str) -> str:
+        """Recover the plain answer from a decorated payload (delivery reconcile).
+
+        Leading 💭 思考 / ⚙️ 执行 blocks are decoration and dropped; a user-authored
+        ``<details>`` inside the answer survives untouched."""
+        if not text:
+            return text
+        stripped = text.lstrip()
+        while stripped.startswith("<details"):
+            end = stripped.find("</details>")
+            if end == -1:
+                break
+            stripped = stripped[end + len("</details>"):].lstrip("\n")
+        return stripped
+
     def _display_payload(self, text: str) -> str:
         """Normalize like ``_send_or_edit`` output: directive strip + fence close + strip."""
         return ensure_closed_code_fences(self._clean_for_display(text or "")).strip()
@@ -319,6 +552,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         the gateway sees a mismatch and re-sends an answer the user already received."""
         if self._turn_split_delivery and self._stream_ledger:
             text = self._stream_ledger
+        text = self._strip_tool_details_block(text)
+        if self._footer_line and text.rstrip().endswith(self._footer_line):
+            text = text.rstrip()[: -len(self._footer_line)].rstrip()
         self._delivered_final_text = self._display_payload(text)
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
@@ -391,6 +627,20 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         """Queue a completed interim assistant commentary message."""
         if text:
             self._queue.put((_COMMENTARY, text))
+
+    def set_footer(self, footer: str) -> None:
+        """Runtime footer to append to the turn-final message (empty = none)."""
+        self._footer_line = (footer or "").strip()
+
+    @property
+    def footer_taken(self) -> bool:
+        """True when a footer is queued to ride the turn-final message."""
+        return bool(self._footer_line)
+
+    def on_reasoning(self, text: str) -> None:
+        """Queue a model reasoning delta for the details block (no-op when it is inactive)."""
+        if text and self._tool_details_active():
+            self._queue.put((_REASONING, text))
 
     def flush_pending_sync(self, timeout: float = 5.0) -> bool:
         """Block the agent worker thread until everything queued so far is delivered:
@@ -554,8 +804,17 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                         await self._suppress_silence_marker()
                         return
 
-                if self._should_edit(tick) and (
-                    self._accumulated or (self._use_native_streaming and self._tool_progress_active)
+                # Inter-tool-call preamble with the details block active: do NOT post it as
+                # its own message — _end_segment folds it into the block (it collapses with
+                # the tool calls at turn end).  Flush barriers keep the normal delivery.
+                _fold_break = (
+                    tick.got_segment_break and not tick.got_done and not tick.got_flush
+                    and self._tool_details_active()
+                )
+                if not _fold_break and self._should_edit(tick) and (
+                    self._accumulated
+                    or ((self._use_native_streaming or self._tool_details_active())
+                        and self._tool_progress_active)
                 ):
                     # Overflow split.  Native streaming bypasses this: the adapter
                     # truncates against the stream protocol's own limit.
@@ -574,6 +833,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                     await self._deliver_commentary(tick.commentary_text)
                 if tick.got_segment_break:
                     await self._end_segment(tick)
+
+                await self._maybe_keepalive_draft()
 
                 # Done last so the waiter unblocks only once everything queued
                 # before the barrier is on screen.
@@ -644,9 +905,14 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             if kind is _FINAL_TEXT:
                 self._adopt_final_text(item[1])
             elif kind is _TOOL_PROGRESS:  # keep draining to batch simultaneous lines
-                if self._use_native_streaming:
+                if self._use_native_streaming or self._tool_details_active():
                     self._tool_progress_lines.append(item[1])
                     self._tool_progress_active = True
+                    self._remember_detail("tool", item[1])
+            elif kind is _REASONING:  # model thinking delta -> details block (no separate message)
+                if self._tool_details_active():
+                    self._append_reasoning(item[1])
+                    self._tool_progress_active = True  # refresh the frame now
             elif kind is _APPROVAL_BOUNDARY:
                 tick.approval_boundary = (item[1], item[2])
                 return tick
@@ -712,10 +978,31 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             # platform-limit check (_len_fn is for overflow).
             should_edit = bool((elapsed >= self._current_edit_interval and self._accumulated)
                                or len(self._accumulated) >= self.cfg.buffer_threshold)
+            # Details block: a tool-progress line must refresh the preview even with no
+            # text yet — otherwise a long tool run shows a stale (or expired) draft.
+            if self._tool_details_active() and self._tool_progress_active:
+                should_edit = True
         # Defer mid-stream edits while the buffer could still resolve to a silence
         # marker ("NO"→"NO_REPLY"); got_done always resolves the buffer.
         return should_edit and not _is_partial_silence_marker(
             self._clean_for_display(self._accumulated))
+
+    async def _maybe_keepalive_draft(self) -> None:
+        """Refresh the live draft frame while the turn is alive.
+
+        Bot API drafts are a ~30s ephemeral preview: a long tool run with no text deltas
+        would otherwise leave the preview stale and let it expire mid-turn.  Identical
+        frames are accepted (live-verified), so re-sending the current content is safe.
+        Skipped for stream-is-the-message adapters (their connector owns the lifetime)."""
+        if (not self._use_draft_streaming or self._message_id is not None
+                or self._stream_is_message()):
+            return
+        if time.monotonic() - self._last_draft_frame_at < _DRAFT_KEEPALIVE_SECONDS:
+            return
+        content = self._compose_frame_content() if self._tool_details_active() else self._accumulated
+        if not content.strip():
+            return
+        await self._send_draft_frame(content)
 
     async def _split_first_send(self, tick: "_Tick") -> bool:
         """No message to edit yet and the buffer overflows: seal only the head chunks; the
@@ -794,7 +1081,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         """Send/edit this tick's visible text (cursor-suffixed unless finalizing)."""
         display_text = self._accumulated
         if tick.is_interim:
-            if self._use_native_streaming:
+            if self._use_native_streaming or self._tool_details_active():
                 display_text = self._compose_frame_content()
                 if display_text and self.cfg.cursor:
                     display_text += self.cfg.cursor
@@ -879,7 +1166,13 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
 
     async def _deliver_commentary(self, commentary_text: str) -> None:
         """Post commentary as its own message.  Cumulative transports keep the stream going —
-        resetting _accumulated would break the append-only invariant / lose text."""
+        resetting _accumulated would break the append-only invariant / lose text.
+
+        With the opt-in details block active the commentary is FOLDED into the block instead
+        (one collapsible execution trace), so no separate interim bubble appears."""
+        if self._tool_details_active():
+            self._remember_detail("text", self._clean_for_display(commentary_text))
+            return
         cumulative = self._cumulative_transport()
         if not cumulative:
             self._reset_segment_state()
@@ -894,7 +1187,16 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         non-prefix snapshot and the connector re-appends the whole answer.  preserve_no_edit:
         "__no_edit__" (platform never returned a real id — Signal, github_comment webhook)
         must keep its sentinel or every tool boundary posts a new message; the
-        continuation goes out once via _send_fallback_final."""
+        continuation goes out once via _send_fallback_final.
+
+        With the opt-in details block active the boundary preamble is FOLDED into the block
+        rather than posted as its own message (run() skips the boundary frame for that case)."""
+        if self._tool_details_active() and not tick.got_flush:
+            if self._fold_segment_into_details():
+                return
+            # Fold refused (the block would be unsafe to render): deliver the preamble as
+            # its own message instead of letting it vanish with the unfolded trace.
+            await self._push_update(tick)
         if self._cumulative_transport():
             return
         # If the segment-break edit didn't land (flood control / fallback mode),
@@ -903,6 +1205,27 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 and self._message_id != "__no_edit__"):
             await self._flush_segment_tail_on_edit_failure()
         self._reset_segment_state(preserve_no_edit=True)
+
+    def _fold_segment_into_details(self) -> bool:
+        """Fold the segment's interim text into the details block and reset the segment
+        WITHOUT delivering it as its own message.  Nothing is recorded as delivered: the
+        folded prose belongs to the collapsible trace, not to the visible answer.
+
+        Returns False when the resulting block cannot render safely (Desktop math guard /
+        rich cap) — the caller then delivers the preamble normally rather than dropping it."""
+        text = self._clean_for_display(self._accumulated).strip()
+        added = False
+        if text:
+            self._remember_detail("text", text)
+            added = True
+        if not self._compose_details_blocks(open_=True):
+            if added:
+                self._details_entries.pop()
+            return False
+        self._reset_message_state()
+        if self._use_draft_streaming and not self._stream_is_message():
+            self._bump_draft_id()
+        return True
 
     async def _on_cancelled(self) -> None:
         """Best-effort final edit on task cancel: finalize=True so REQUIRES_EDIT_FINALIZE

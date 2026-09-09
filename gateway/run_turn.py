@@ -1472,7 +1472,7 @@ class GatewayTurnMixin:
             # (#26877).  Both kwargs are None-tolerant so the footer is
             # unchanged for users who don't include ``tps`` in
             # ``display.runtime_footer.fields``.
-            return _bfl(
+            _line = _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
@@ -1481,6 +1481,9 @@ class GatewayTurnMixin:
                 response_tokens=int(agent_result.get("turn_output_tokens") or 0) or None,
                 elapsed_ms=_turn_seconds * 1000.0 if _turn_seconds else None,
             )
+            # Monospace footer (local patch): the metadata rides the turn-final message as an
+            # inline code span, so it renders mono instead of blending into the answer body.
+            return f"`{_line}`" if _line else ""
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)
             return ""
@@ -1747,8 +1750,9 @@ class GatewayTurnMixin:
         if agent_result.get("already_sent") and not agent_result.get("failed"):
             if response and adapter:
                 await self._deliver_media_from_response(response, event, adapter)
-            # Streaming delivered the body, but the footer was held back (`not already_sent` gate).
-            if _footer_line and adapter:
+            # Streaming delivered the body; the footer rides that message when the consumer
+            # took it, else fall back to a trailing send.
+            if _footer_line and adapter and not agent_result.get("footer_streamed"):
                 try:
                     await adapter.send(source.chat_id, _footer_line, metadata=self._event_thread_metadata(event, source))
                 except Exception as _e:
@@ -2432,11 +2436,18 @@ class GatewayTurnMixin:
             float(getattr(scfg, "fresh_final_after_seconds", 0.0) or 0.0)
             if source.platform == Platform.TELEGRAM else 0.0
         )
+        # Opt-in collapsible tool-call block (display.platforms.<platform>.tool_progress_details);
+        # the consumer only uses it when the adapter probe confirms rich drafts + sends.
+        from gateway.display_config import resolve_display_setting as _resolve_display
+        from gateway.run import _load_gateway_config as _load_gw_config, _platform_config_key as _plat_key
+        _tool_details = bool(_resolve_display(
+            _load_gw_config(), _plat_key(source.platform), "tool_progress_details", False))
         _consumer_cfg = StreamConsumerConfig(
             edit_interval=scfg.edit_interval, buffer_threshold=scfg.buffer_threshold,
             cursor=_effective_cursor, buffer_only=_buffer_only,
             fresh_final_after_seconds=_fresh_final_secs, transport=scfg.transport or "edit",
             chat_type=getattr(source, "chat_type", "") or "",
+            tool_progress_details=_tool_details,
         )
         return _consumer_cfg, _pause_typing_before_finalize
 
@@ -3637,6 +3648,11 @@ class GatewayTurnMixin:
         ``response["already_sent"]`` and log ``ok``. ``fail_result`` (None = trust the call) logs a
         returned failure as ``(session, error)``; ``fail_exc`` logs an exception as ``(session, exc)``."""
         try:
+            # Keep the opt-in trace block on a reconciled final: this path replaces the
+            # streamed message wholesale, so without re-decorating, the trace would vanish.
+            _decorate = getattr(_sc, "_final_payload", None)
+            if callable(_decorate):
+                content = _decorate(content)
             _res = await _sc.adapter.edit_message(
                 chat_id=source.chat_id, message_id=_sc.message_id, content=content, finalize=True,
             )

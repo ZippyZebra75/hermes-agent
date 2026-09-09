@@ -1506,6 +1506,28 @@ class TelegramAdapter(BasePlatformAdapter):
         self._record_rich_sent(chat_id, message_id, content)
         return SendResult(success=True, message_id=message_id)
 
+    # ── Opt-in collapsible tool-call block (display.platforms.telegram.tool_progress_details) ──
+    def tool_details_supported(self) -> bool:
+        """True when a collapsible ``<details>`` tool-call block renders on BOTH paths the
+        stream consumer uses: the streamed draft frame (rich draft) and the persisted final
+        (rich send).  Opt-in only (``rich_messages`` + ``rich_drafts``) and latched off after
+        a capability failure, so a dead rich endpoint cannot spam errors."""
+        return bool(
+            getattr(self, "_rich_messages_enabled", False)
+            and getattr(self, "_rich_drafts_enabled", False)
+            and not getattr(self, "_rich_send_disabled", False)
+            and not getattr(self, "_rich_draft_disabled", False)
+            and self._bot_supports_rich())
+
+    def tool_details_block_ok(self, details_markdown: str) -> bool:
+        """False when a tool-details block would trip the Telegram Desktop math-in-details
+        crash guard (tdesktop#30808) or the rich length cap.  The consumer then keeps the
+        legacy plain overlay instead of emitting raw ``<details>`` tags through MarkdownV2."""
+        return bool(
+            details_markdown and details_markdown.strip()
+            and not self._has_telegram_desktop_details_math_crash_shape(details_markdown)
+            and self._content_fits_rich_limits(details_markdown))
+
     def _should_attempt_rich_draft(self, content: str) -> bool:
         return bool(
             getattr(self, "_rich_messages_enabled", True)

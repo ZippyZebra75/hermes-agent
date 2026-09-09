@@ -73,6 +73,39 @@ class TurnRunner:
         holder = self._ctx.stream_consumer_holder
         return holder[0] if holder else None
 
+    def _reasoning_details_enabled(self) -> bool:
+        """True when the opt-in tool-details block will carry this turn's reasoning.
+
+        Probes the config + adapter (not ``_tool_details_active``, whose transport flag is
+        only resolved once the consumer's run() has started)."""
+        sc = self._stream_consumer()
+        cfg = getattr(sc, "cfg", None)
+        if not bool(getattr(cfg, "tool_progress_details", False)):
+            return False
+        probe = getattr(getattr(sc, "adapter", None), "tool_details_supported", None)
+        if not callable(probe):
+            return False
+        try:
+            return probe() is True
+        except Exception:
+            return False
+
+    def _make_reasoning_callback(self):
+        """Reasoning deltas -> the details block. None when the block is off, leaving the
+        agent's default reasoning handling untouched."""
+        if not self._reasoning_details_enabled():
+            return None
+
+        def _on_reasoning(text: str) -> None:
+            if not text:
+                return
+            sc = self._stream_consumer()
+            route = getattr(sc, "on_reasoning", None) if sc is not None else None
+            if callable(route):
+                with suppress(Exception):
+                    route(text)
+        return _on_reasoning
+
     def _drain_progress_queue(self) -> None:
         q = self._ctx.progress_queue
         with suppress(Exception):
@@ -1582,6 +1615,9 @@ class TurnRunner:
         ctx.result_holder[0] = result
         if stream_consumer is None:
             return
+        if isinstance(result, dict):
+            # Tells _hmwa_deliver_turn_response not to send the footer as a trailing message.
+            result["footer_streamed"] = bool(getattr(stream_consumer, "footer_taken", False))
         # Pass final_response as the authoritative finalize payload: it includes post-stream
         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
         # completed final: interrupt paths return {interrupted: True, completed: False} with a
@@ -1731,6 +1767,7 @@ class TurnRunner:
         from gateway.run import _current_max_iterations, _normalize_empty_agent_response, _sanitize_gateway_final_response
         ctx = self._ctx
         runner = self._runner
+        _turn_started = time.monotonic()
         # Platform.LOCAL ("local") maps to the "cli" hint key the agent understands.
         # session_key is propagated via contextvars in _set_session_env() (_SESSION_KEY) and via
         # set_current_session_key() (_approval_session_key) below — both concurrency-safe and inherited by
@@ -1765,6 +1802,11 @@ class TurnRunner:
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
+        # Reasoning deltas join the opt-in details block; None keeps the agent's default
+        # handling.  Wired here rather than inside _wire_turn_agent_callbacks: that helper is
+        # driven by callers holding minimal fakes (tests/gateway/test_display_null_turn_wiring.py),
+        # so it must not gain new `self.` dependencies.
+        agent.reasoning_callback = self._make_reasoning_callback()
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
         # Snapshot cumulative completion tokens for a per-turn tps delta in the
@@ -1773,6 +1815,13 @@ class TurnRunner:
         # a session total — the delta over this snapshot is this turn.
         ctx.turn_completion_tokens_start = getattr(agent, "session_completion_tokens", 0) or 0
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
+        # Runtime footer rides the streamed turn-final message (no trailing send).
+        if stream_consumer is not None:
+            with suppress(Exception):
+                _footer = runner._hmwa_runtime_footer_line(
+                    result, ctx.source, time.monotonic() - _turn_started)
+                if _footer:
+                    stream_consumer.set_footer(_footer)
         self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.

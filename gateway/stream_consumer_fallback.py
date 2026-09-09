@@ -41,11 +41,12 @@ class StreamFallbackMixin:
             return reply_to_id
 
     def _visible_prefix(self) -> str:
-        """Return the visible text already shown in the streamed message."""
+        """Return the visible text already shown in the streamed message (tool-details
+        decoration stripped: it is transport ornament, not answer content)."""
         prefix = self._last_sent_text or ""
         if self.cfg.cursor and prefix.endswith(self.cfg.cursor):
             prefix = prefix[:-len(self.cfg.cursor)]
-        return self._clean_for_display(prefix)
+        return self._clean_for_display(self._strip_tool_details_block(prefix))
 
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""

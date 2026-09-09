@@ -173,6 +173,7 @@ class StreamTransportMixin:
         else:
             if getattr(result, "success", False):
                 self._last_sent_text = text  # parity with the edit-based no-op skip
+                self._last_draft_frame_at = time.monotonic()  # keepalive clock
                 return True
             # P5(b): an AUTHORIZATION decline is terminal for the whole run, not
             # merely "drafts are unusable". Disabling drafts alone routes the
@@ -309,6 +310,10 @@ class StreamTransportMixin:
         last edit.  Transport order: native frame → draft frame → edit existing → first
         send; a transport returns None to fall through to the next."""
         text = self._clean_for_display(text)
+        if finalize and is_turn_final:
+            # Opt-in: prepend the COLLAPSED trace block to the plain answer (no-op unless
+            # tool_progress_details is active).
+            text = self._final_payload(text)
         # Stream-is-the-message draft frames must stay prefix-stable: a closing ```
         # on a mid-code-block frame makes frame N not a prefix of N+1 and the
         # connector re-appends the whole snapshot.  The final is still fence-closed.

@@ -862,6 +862,10 @@ DEFAULT_CONFIG = {
         # "separate" one message per tool (noisier). Needs tool_progress enabled. Per-platform:
         # display.platforms.<platform>.tool_progress_grouping.
         "tool_progress_grouping": "accumulate",
+        # Render tool progress inside a collapsible <details> block (expanded while
+        # streaming, collapsed in the persisted final). Telegram rich_messages +
+        # rich_drafts required; other platforms keep the legacy behaviour.
+        "tool_progress_details": False,
         # Custom long-running status phrases. Defaults: gateway/assets/status_phrases.yaml.
         # `path`/`paths` = HERMES_HOME-relative YAML files/dirs (or conventional status_phrases.yaml
         # / status_phrases/*.yaml). Keys: status, generic. mode: "append" (default) | "replace".

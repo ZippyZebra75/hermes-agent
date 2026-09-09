@@ -34,6 +34,11 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response where deletion is
     # supported (Telegram); failed runs keep them as breadcrumbs.
     "cleanup_progress": False,
+    # Render tool progress inside a collapsible <details> block in the streaming message
+    # (expanded while streaming, collapsed in the persisted final) instead of separate
+    # progress bubbles.  Requires a rich-message transport (Telegram rich_messages +
+    # rich_drafts); unsupported adapters keep the legacy behaviour.
+    "tool_progress_details": False,
     # Working-state text on text-rendering indicators (Slack assistant status): "full"/true = verb +
     # argument preview, "verb" = verb only (keeps paths out of shared channels), "off"/false = static.
     "live_status": "full",
@@ -164,6 +169,7 @@ _NORMALISERS: dict[str, Any] = {
     "busy_steer_ack_enabled": _norm_bool,
     "thinking_progress": _norm_bool,
     "cleanup_progress": _norm_cleanup_progress,
+    "tool_progress_details": _norm_bool,
     "live_status": _norm_tristate("full", "off", {"full", "verb", "off"}, extra_truthy={"all"}),
     "tool_progress_grouping": _norm_choice(("accumulate", "separate")),
     "tool_progress_style": _norm_choice(("normal", "italic")),
