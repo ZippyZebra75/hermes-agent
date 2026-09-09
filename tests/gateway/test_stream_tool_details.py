@@ -9,6 +9,7 @@ While streaming the block lives in the draft frames and folds one-way once the a
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -142,6 +143,53 @@ class TestToolDetailsDraftIdentity:
         assert adapter.draft_calls, "expected streamed draft frames"
         assert len(set(adapter.draft_ids)) == 1
 
+class TestToolDetailsSummary:
+    """Summary line contract: step count + elapsed time; the live head says 执行中."""
+
+    @pytest.mark.asyncio
+    async def test_live_head_says_running_and_final_drops_it(self):
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.02)
+        consumer.on_tool_progress("terminal: ls")
+        await asyncio.sleep(0.08)
+
+        frames = [f for f in adapter.draft_calls if "<details" in f]
+        assert frames, "expected streamed trace frames"
+        assert all(re.search(r"<summary>⚙️ 执行中 · 1 步 · \d+s</summary>", f) for f in frames)
+
+        consumer.finish("答案。")
+        await task
+        final = adapter.sent[-1]
+        assert re.search(r"<summary>⚙️ 执行 · 1 步 · \d+s</summary>", final)
+        assert "执行中" not in final
+
+    @pytest.mark.asyncio
+    async def test_prose_only_summary_has_no_step_count(self):
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        await _run_turn(consumer, ("commentary", "先说明一句。"), ("text", "答案。"))
+
+        assert re.search(r"<summary>💬 说明 · \d+s</summary>", adapter.sent[-1])
+
+    @pytest.mark.asyncio
+    async def test_thinking_only_summary_counts_segments(self):
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.02)
+        consumer.on_reasoning("想一下。")
+        await asyncio.sleep(0.08)
+
+        frames = [f for f in adapter.draft_calls if "<details" in f]
+        assert frames and all(
+            re.search(r"<summary>💭 思考 · 1 段 · \d+s</summary>", f) for f in frames)
+
+        consumer.finish("答案。")
+        await task
+
+
 
 class TestToolDetailsDelivery:
     @pytest.mark.asyncio
@@ -157,7 +205,7 @@ class TestToolDetailsDelivery:
 
         assert len(adapter.sent) == 1, "one message per turn"
         final = adapter.sent[0]
-        assert final.startswith("<details><summary>⚙️ 执行 · 1 次工具调用</summary>")
+        assert final.startswith("<details><summary>⚙️ 执行 · 1 步")
         assert "terminal: ls -la" in final
         assert final.rstrip().endswith("Hello world!")   # answer plain, below the block
         assert "<details open>" not in final
@@ -189,7 +237,7 @@ class TestToolDetailsDelivery:
         final = _final(adapter)
         assert "terminal: first" in final
         assert "read_file: second" in final
-        assert "⚙️ 执行 · 2 次工具调用" in final
+        assert "⚙️ 执行 · 2 步" in final
 
     @pytest.mark.asyncio
     async def test_unsafe_block_degrades_to_plain_answer(self):
@@ -228,7 +276,7 @@ class TestToolDetailsInterimText:
         )
 
         final = _final(adapter)
-        assert final.startswith("<details><summary>⚙️ 执行 · 1 次工具调用 · 1 段说明</summary>")
+        assert final.startswith("<details><summary>⚙️ 执行 · 1 步")
         assert "先看一下配置文件。" in final
         assert final.rstrip().endswith("配置没问题，这是答案。")
 
@@ -331,7 +379,7 @@ class TestToolDetailsReasoning:
         )
 
         final = _final(adapter)
-        assert final.startswith("<details><summary>⚙️ 执行 · 1 次工具调用</summary>")
+        assert final.startswith("<details><summary>⚙️ 执行 · 1 步")
         assert "> 💭 先想一下这个问题的结构。" in final
         assert "段思考" not in final
         assert final.rstrip().endswith("答案。")
@@ -403,7 +451,7 @@ class TestToolDetailsReasoning:
         )
 
         final = _final(adapter)
-        assert "<details><summary>⚙️ 执行 · 1 次工具调用</summary>" in final
+        assert "<details><summary>⚙️ 执行 · 1 步" in final
         assert "💭" not in final
         assert "terminal: ls" in final
 
@@ -433,7 +481,7 @@ class TestToolDetailsReasoning:
         assert "> 💭 思考中。" in frames[0]
 
         final = adapter.sent[-1]
-        assert final.startswith("<details><summary>⚙️ 执行 · 1 次工具调用</summary>")
+        assert final.startswith("<details><summary>⚙️ 执行 · 1 步")
         assert "<details open>" not in final
         assert final.rstrip().endswith("答案。")
 

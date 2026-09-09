@@ -63,9 +63,10 @@ _DEFAULT_BOUNDARY_PLACEHOLDER = "⏸ 等待审批中..."
 # One collapsed trace block (💭 思考 quotes + ⚙️ 执行 breadcrumbs, in real order) ahead of
 # the plain result text, which is NEVER folded.  Local patch.
 _EXEC_SUMMARY = "⚙️ 执行"
+_EXEC_RUNNING_SUMMARY = "⚙️ 执行中"  # streaming head; the final drops 中 (one live status word)
 _REASONING_SUMMARY = "💭 思考"  # trace-block summary when the turn only thought
+_TEXT_SUMMARY = "💬 说明"  # no tool calls, only inter-tool-call prose
 _REASONING_MAX_CHARS = 200  # per-segment cap on rendered thinking (Boss: long thinking delays)
-_TOOL_DETAILS_RUNNING_SUFFIX = " · 正在执行…"
 _TOOL_DETAILS_MAX_ENTRIES = 100  # cap on block entries (rich-message block budget)
 
 # Bot API drafts (sendMessageDraft / sendRichMessageDraft) are a ~30s ephemeral preview:
@@ -152,6 +153,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._on_before_finalize = on_before_finalize
         self._initial_reply_to_id = initial_reply_to_id
         self._turn_id = str(uuid.uuid4())  # keys send_stream_frame() per concurrent consumer
+        self._turn_started_at = time.monotonic()  # trace-summary elapsed clock (per-turn instance)
         # Returns False after /new or /stop; run() then abandons the stream.
         self._run_still_current = run_still_current or (lambda: True)
         # Only platforms needing an explicit finalize call (DingTalk AI Cards) force a
@@ -371,6 +373,24 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         cmd = cmd.replace("`", "'")  # a backtick would close the inline-code span early
         return f"{header} `{cmd}`"
 
+    def _elapsed_label(self) -> str:
+        """Turn elapsed time for the trace summary: ``12s`` / ``1m12s`` / ``1h05m``.
+
+        Empty when no clock exists (consumer built by a test double) so the summary
+        simply omits the field instead of rendering ``0s``.
+        """
+        started = getattr(self, "_turn_started_at", None)
+        if not started:
+            return ""
+        secs = int(max(0.0, time.monotonic() - started))
+        if secs < 60:
+            return f"{secs}s"
+        minutes, secs = divmod(secs, 60)
+        if minutes < 60:
+            return f"{minutes}m{secs:02d}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h{minutes:02d}m"
+
     def _tool_details_block(self, *, open_: bool) -> str:
         """Collapsible ``<details>`` markdown for the collected execution trace (tool
         breadcrumbs + interim prose), or "" when there is nothing to show / the adapter
@@ -380,17 +400,19 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             return ""
         tool_count = sum(1 for kind, _ in entries if kind == "tool")
         text_count = sum(1 for kind, _ in entries if kind == "text")
-        if not tool_count and not text_count:
-            summary = _REASONING_SUMMARY          # thinking-only trace
+        reasoning_count = sum(1 for kind, _ in entries if kind == "reasoning")
+        if tool_count:
+            head = _EXEC_RUNNING_SUMMARY if open_ else _EXEC_SUMMARY
+            summary = f"{head} · {tool_count} 步"
+        elif text_count:
+            summary = _TEXT_SUMMARY
         else:
-            bits = [_EXEC_SUMMARY]
-            if tool_count:
-                bits.append(f"{tool_count} 次工具调用")
-            if text_count:
-                bits.append(f"{text_count} 段说明")
-            summary = " · ".join(bits)
-        if open_:
-            summary += _TOOL_DETAILS_RUNNING_SUFFIX
+            summary = _REASONING_SUMMARY          # thinking-only trace
+            if reasoning_count:
+                summary += f" · {reasoning_count} 段"
+        elapsed = self._elapsed_label()
+        if elapsed:
+            summary += f" · {elapsed}"
         # Consecutive tool breadcrumbs collapse into one bullet list; interim prose stays
         # paragraphs and the thinking renders as a blockquote, preserving real order.
         parts: list[str] = []
