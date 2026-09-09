@@ -27,6 +27,7 @@ def _make_adapter(*, supports_draft: bool = True, details_supported=True, block_
     adapter._typing_paused = set()
     adapter._fatal_error_message = None
     adapter.draft_calls: list[str] = []
+    adapter.draft_ids: list[int] = []
     adapter.sent: list[str] = []
 
     adapter.tool_details_supported = lambda: details_supported
@@ -39,6 +40,7 @@ def _make_adapter(*, supports_draft: bool = True, details_supported=True, block_
 
     async def _send_draft(*, chat_id, draft_id, content, metadata=None):
         adapter.draft_calls.append(content)
+        adapter.draft_ids.append(draft_id)
         return SendResult(success=True, message_id=None)
 
     adapter.send_draft = _send_draft
@@ -114,6 +116,31 @@ class TestToolDetailsGating:
         consumer = _make_consumer(adapter, tool_progress_details=True)
         consumer._use_draft_streaming = True
         assert consumer.accepts_tool_progress is False
+
+
+class TestToolDetailsDraftIdentity:
+    """A tool boundary must keep ONE live draft while the cumulative trace block is active.
+
+    Telegram treats a NEW ``draft_id`` as a NEW live draft (core.telegram.org/api/bots/ai:
+    "this will add a new live draft along with existing ones"), so bumping at every tool
+    boundary made the whole trace+text reappear as a second draft message (visible re-send +
+    flicker on mobile).  Without the trace block the segment is finalized as a real message
+    first, which clears the old draft — there the bump stays correct.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_boundary_keeps_one_draft_id_with_details(self):
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        await _run_turn(
+            consumer,
+            ("text", "preamble "),
+            ("tool", "terminal `ls`"),
+            ("break", None),
+            ("text", "answer"),
+        )
+        assert adapter.draft_calls, "expected streamed draft frames"
+        assert len(set(adapter.draft_ids)) == 1
 
 
 class TestToolDetailsDelivery:

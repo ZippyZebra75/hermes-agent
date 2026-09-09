@@ -718,7 +718,11 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # Telegram-shaped drafts: bump draft_id so the next segment animates as a fresh
         # preview below the tool-progress bubbles.  Stream-is-the-message adapters keep
         # ONE stream per turn — a bump there left one frozen message per segment.
-        if self._use_draft_streaming and not self._stream_is_message():
+        # The collapsible trace block is CUMULATIVE and nothing finalized the draft that
+        # held it, so a bump makes Telegram APPEND a second live draft carrying the same
+        # trace+text (visible re-send + flicker).  Keep one draft and animate in place.
+        if (self._use_draft_streaming and not self._stream_is_message()
+                and not self._tool_details_active()):
             self._bump_draft_id()
 
     def _bump_draft_id(self) -> None:
@@ -1247,7 +1251,10 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 self._details_entries.pop()
             return False
         self._reset_message_state()
-        if self._use_draft_streaming and not self._stream_is_message():
+        # Folded text stays in the SAME live draft (see _reset_segment_state): a bump here
+        # appends a second draft holding the same cumulative trace+text.
+        if (self._use_draft_streaming and not self._stream_is_message()
+                and not self._tool_details_active()):
             self._bump_draft_id()
         return True
 
