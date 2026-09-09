@@ -60,11 +60,11 @@ _DEFAULT_BOUNDARY_PLACEHOLDER = "⏸ 等待审批中..."
 # Opt-in collapsible tool-call block (display.platforms.<platform>.tool_progress_details):
 # tool progress + inter-tool-call interim text render as an EXPANDED <details> inside the
 # streaming frame, and the persisted final carries the same block COLLAPSED.  Local patch.
-# Three-section final message: 💭 思考 (own collapsed block) → ⚙️ 执行 (own collapsed
-# block) → result (plain text, NEVER folded).  Local patch.
+# One collapsed trace block (💭 思考 quotes + ⚙️ 执行 breadcrumbs, in real order) ahead of
+# the plain result text, which is NEVER folded.  Local patch.
 _EXEC_SUMMARY = "⚙️ 执行"
-_REASONING_SUMMARY = "💭 思考"  # own collapsible block; first segment only
-_REASONING_MAX_CHARS = 500  # hard cap on the rendered thinking (Boss: long thinking delays)
+_REASONING_SUMMARY = "💭 思考"  # trace-block summary when the turn only thought
+_REASONING_MAX_CHARS = 200  # per-segment cap on rendered thinking (Boss: long thinking delays)
 _TOOL_DETAILS_RUNNING_SUFFIX = " · 正在执行…"
 _TOOL_DETAILS_MAX_ENTRIES = 100  # cap on block entries (rich-message block budget)
 
@@ -184,10 +184,10 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # Runtime footer (model/context/latency): appended to the SAME turn-final message
         # instead of a trailing send (see set_footer).
         self._footer_line = ""
-        # Only the FIRST reasoning segment is kept (long thinking delays reading the reply);
-        # closed once any tool/prose entry lands, later reasoning deltas are dropped.
-        self._reasoning_closed = False
-        self._reasoning_truncated = False  # hit _REASONING_MAX_CHARS
+        # Every reasoning segment is kept (interleaved thinking after tool calls included);
+        # each segment is capped at _REASONING_MAX_CHARS, flagged here once the last
+        # (still-growing) segment hit that cap.
+        self._reasoning_capped = False
         self._in_think_block = False  # think-tag filter state (mirrors CLI _stream_delta)
         self._think_buffer = ""
         self._before_finalize_notified = False
@@ -309,9 +309,6 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         text = (text or "").strip()
         if not text:
             return
-        if kind != "reasoning":
-            # First reasoning segment ends here; later thinking is dropped by design.
-            self._reasoning_closed = True
         if len(self._details_entries) < _TOOL_DETAILS_MAX_ENTRIES:
             self._details_entries.append((kind, text))
         elif len(self._details_entries) == _TOOL_DETAILS_MAX_ENTRIES:
@@ -328,26 +325,31 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         return "\n".join(out)
 
     def _append_reasoning(self, text: str) -> None:
-        """Accumulate the FIRST reasoning segment only, hard-capped at
-        ``_REASONING_MAX_CHARS`` (long thinking delays reading the reply; later segments
-        are dropped entirely)."""
-        if not (text or "").strip() or self._reasoning_closed:
+        """Accumulate reasoning deltas into the trace, one entry per reasoning SEGMENT.
+
+        Every segment is kept — thinking that resumes after a tool call is no longer
+        hidden — and each segment is capped at ``_REASONING_MAX_CHARS`` (long thinking
+        delays reading the reply): a capped segment is closed with an ellipsis and its
+        remaining deltas dropped, while the next segment starts a fresh entry."""
+        if not (text or "").strip():
             return
         if self._details_entries and self._details_entries[-1][0] == "reasoning":
+            if self._reasoning_capped:
+                return
             kind, prev = self._details_entries[-1]
             room = _REASONING_MAX_CHARS - len(prev)
             if room <= 0:
-                self._reasoning_truncated = True
-                return
-            if len(text) > room:
-                text = text[:room]
-                self._reasoning_truncated = True
-            self._details_entries[-1] = (kind, prev + text)
-        else:
-            if len(text) > _REASONING_MAX_CHARS:
-                text = text[:_REASONING_MAX_CHARS]
-                self._reasoning_truncated = True
-            self._remember_detail("reasoning", text)
+                self._details_entries[-1] = (kind, prev + "…")
+                self._reasoning_capped = True
+            elif len(text) > room:
+                self._details_entries[-1] = (kind, prev + text[:room] + "…")
+                self._reasoning_capped = True
+            else:
+                self._details_entries[-1] = (kind, prev + text)
+            return
+        truncated = len(text) > _REASONING_MAX_CHARS
+        self._remember_detail("reasoning", text[:_REASONING_MAX_CHARS] + "…" if truncated else text)
+        self._reasoning_capped = truncated
 
     def _tool_details_block(self, *, open_: bool) -> str:
         """Collapsible ``<details>`` markdown for the collected execution trace (tool
@@ -381,7 +383,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 parts.append("\n".join(bullets))
                 bullets = []
             if kind == "reasoning":
-                parts.append(self._quote_reasoning(text + ("…" if self._reasoning_truncated else "")))
+                parts.append(self._quote_reasoning(text))
             else:
                 parts.append(text)
         if bullets:
