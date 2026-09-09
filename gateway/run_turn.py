@@ -3673,6 +3673,13 @@ class GatewayTurnMixin:
         payload: a mismatch (False, incl. payload-less split delivery) never suppresses; None (no
         record) keeps legacy trust."""
         _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
+        if isinstance(response, dict):
+            # The consumer embeds the runtime footer in its turn-final payload (set_footer), so
+            # record that on the result the delivery path sees: the runner's INNER result dict
+            # (where _finish_stream_consumer sets the same key) never reaches
+            # _hmwa_deliver_turn_response, which then sent the footer a second time as a
+            # trailing message (two footers in the chat).
+            response["footer_streamed"] = bool(getattr(_sc, "footer_taken", False))
         if not isinstance(response, dict) or response.get("failed"):
             return
         _final = response.get("final_response") or ""

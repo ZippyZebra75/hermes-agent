@@ -1615,9 +1615,6 @@ class TurnRunner:
         ctx.result_holder[0] = result
         if stream_consumer is None:
             return
-        if isinstance(result, dict):
-            # Tells _hmwa_deliver_turn_response not to send the footer as a trailing message.
-            result["footer_streamed"] = bool(getattr(stream_consumer, "footer_taken", False))
         # Pass final_response as the authoritative finalize payload: it includes post-stream
         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
         # completed final: interrupt paths return {interrupted: True, completed: False} with a

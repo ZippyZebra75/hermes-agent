@@ -574,3 +574,69 @@ class TestFooterMonospace:
             SimpleNamespace(platform=Platform.TELEGRAM), 1.0)
 
         assert line == ""
+
+
+class TestFooterNotSentTwice:
+    """The footer rides the streamed turn-final message, so the delivery path must be told —
+    the runner's inner result dict never reaches it (live bug: two footers in the chat)."""
+
+    def _mark(self, consumer):
+        from gateway.run_turn import GatewayTurnMixin
+
+        turn_ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer],
+            source=SimpleNamespace(chat_id="1"), session_key="s")
+        self_ = SimpleNamespace(_run_agent_stream_confirmed_final_delivery=lambda *a, **k: True)
+        response = {"final_response": "answer", "failed": False}
+        return response, GatewayTurnMixin._run_agent_mark_streamed_delivery(self_, response, turn_ctx)
+
+    @pytest.mark.asyncio
+    async def test_streamed_footer_is_recorded_on_the_result(self):
+        response, coro = self._mark(SimpleNamespace(footer_taken=True))
+        await coro
+
+        assert response["footer_streamed"] is True
+        assert response["already_sent"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_footer_queued_leaves_the_flag_false(self):
+        response, coro = self._mark(SimpleNamespace(footer_taken=False))
+        await coro
+
+        assert response["footer_streamed"] is False
+
+    @pytest.mark.asyncio
+    async def test_streamed_footer_is_not_sent_trailing(self):
+        from gateway.run_turn import GatewayTurnMixin
+
+        adapter = SimpleNamespace(send=AsyncMock())
+        self_ = SimpleNamespace(
+            _adapter_for_source=lambda source: adapter,
+            _should_send_voice_reply=lambda *a, **k: False,
+            _deliver_media_from_response=AsyncMock(),
+            _event_thread_metadata=lambda event, source: None,
+        )
+        out = await GatewayTurnMixin._hmwa_deliver_turn_response(
+            self_, SimpleNamespace(), SimpleNamespace(chat_id="1"), SimpleNamespace(session_id="s"),
+            "sk", 1, {"already_sent": True, "footer_streamed": True}, [], "answer", "`f`", False)
+
+        assert out is None
+        assert adapter.send.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_unstreamed_footer_still_sent_trailing(self):
+        from gateway.run_turn import GatewayTurnMixin
+
+        adapter = SimpleNamespace(send=AsyncMock())
+        self_ = SimpleNamespace(
+            _adapter_for_source=lambda source: adapter,
+            _should_send_voice_reply=lambda *a, **k: False,
+            _deliver_media_from_response=AsyncMock(),
+            _event_thread_metadata=lambda event, source: None,
+        )
+        await GatewayTurnMixin._hmwa_deliver_turn_response(
+            self_, SimpleNamespace(), SimpleNamespace(chat_id="1"), SimpleNamespace(session_id="s"),
+            "sk", 1, {"already_sent": True}, [], "answer", "`f`", False)
+
+        assert adapter.send.await_count == 1
+        assert adapter.send.await_args.args[1] == "`f`"
