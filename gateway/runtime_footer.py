@@ -4,7 +4,8 @@ minimal. Config: ``display.runtime_footer: {enabled: bool, fields: [model, conte
 toggled by ``/footer on|off``. Fields: ``model`` (vendor prefix dropped), ``context_pct`` (last-call
 occupancy), ``latency`` (turn wall-clock, opt-in — NOT in the default set so an unset ``fields``
 renders exactly as before), ``tps`` (decode-phase tokens/sec — opt-in like ``latency``),
-``cwd`` (home-relative). ``gateway/run.py`` appends the footer to the final response only (never to
+``cwd`` (home-relative), ``out_tokens`` (THIS turn's output tokens — opt-in like ``latency``).
+``gateway/run.py`` appends the footer to the final response only (never to
 tool-progress or streaming partials); when streaming already delivered the text, it goes out as a
 trailing message via ``send_trailing_footer()``.
 """
@@ -85,6 +86,19 @@ def _format_latency(seconds: float) -> str:
     return f"{m}m{sec:02d}s"
 
 
+def _format_out_tokens(tokens: Optional[int]) -> str:
+    """Render this turn's output tokens: ``842 tok`` / ``12.3k tok`` ("" when unknown).
+
+    ``tokens`` is the per-turn delta (``turn_output_tokens`` = session completion tokens now
+    minus the pre-turn snapshot), so the number is THIS turn's output, not the session total.
+    """
+    if not tokens or tokens <= 0:
+        return ""
+    if tokens >= 1000:
+        return f"{tokens / 1000:.1f}k tok"
+    return f"{tokens} tok"
+
+
 def _format_tps(response_tokens: Optional[int], elapsed_ms: Optional[float]) -> str:
     """Render a ``tokens-per-second`` value as ``"NNt/s"`` or return ``""``.
 
@@ -132,6 +146,8 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
         # Skipped when the caller supplied no token/timing data.
         "tps": lambda: _format_tps(response_tokens, elapsed_ms),
+        # This turn's output tokens (same per-turn delta tps divides by decode time).
+        "out_tokens": lambda: _format_out_tokens(response_tokens),
     }
     return _SEP.join(v for field in fields if (render := renderers.get(field)) and (v := render()))
 

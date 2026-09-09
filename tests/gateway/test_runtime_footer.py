@@ -324,6 +324,31 @@ def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+class TestOutTokensField:
+    """``out_tokens`` — this turn's output tokens (opt-in field)."""
+
+    def test_renders_plain_count_below_1000(self):
+        out = format_runtime_footer(
+            model=None, context_tokens=0, context_length=None,
+            fields=("out_tokens",), response_tokens=842,
+        )
+        assert out == "842 tok"
+
+    def test_renders_k_suffix_at_or_above_1000(self):
+        out = format_runtime_footer(
+            model=None, context_tokens=0, context_length=None,
+            fields=("out_tokens",), response_tokens=12345,
+        )
+        assert out == "12.3k tok"
+
+    def test_skipped_without_usage(self):
+        for value in (None, 0, -5):
+            assert format_runtime_footer(
+                model="gpt-5", context_tokens=0, context_length=None,
+                fields=("out_tokens",), response_tokens=value,
+            ) == ""
+
+
 class TestTpsField:
     def test_tps_renders_decimal_below_100(self):
         # 50 tokens in 2 seconds = 25 t/s — under 100, decimal format.
