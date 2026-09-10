@@ -903,19 +903,35 @@ class TestFTS5Search:
         ]
         assert all("context" in row and row["context"] for row in default)
 
-    def test_search_projection_skips_context_enrichment_queries(self, db):
+    def test_search_projection_skips_context_enrichment_queries(self, db, monkeypatch):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="before")
         db.append_message("s1", role="assistant", content="projectionneedle")
         db.append_message("s1", role="user", content="after")
 
         statements = []
-        read_conn = db._get_read_conn() or db._conn
-        traced_connections = [db._conn]
-        if read_conn is not db._conn:
-            traced_connections.append(read_conn)
-        for conn in traced_connections:
-            conn.set_trace_callback(statements.append)
+        traced_connections = []
+
+        # The context enrichment runs on a POOLED read-only connection
+        # (_finalize_search_matches -> _read_ctx -> _checkout_read_conn), NOT on
+        # db._conn / _get_read_conn().  Tracing only those two measured a constant zero:
+        # the "== 0" half then passed vacuously (a projection path that DID enrich would
+        # still read 0) while the "== 1" half could never pass.  Install the probe on
+        # every connection the read path actually checks out.
+        def trace(conn):
+            if conn is not None and conn not in traced_connections:
+                traced_connections.append(conn)
+                conn.set_trace_callback(statements.append)
+
+        trace(db._conn)
+        original_checkout = db._checkout_read_conn
+
+        def checkout_with_probe():
+            conn = original_checkout()
+            trace(conn)
+            return conn
+
+        monkeypatch.setattr(db, "_checkout_read_conn", checkout_with_probe)
 
         def context_query_count():
             normalized = (" ".join(sql.upper().split()) for sql in statements)
@@ -942,6 +958,7 @@ class TestFTS5Search:
         finally:
             for conn in traced_connections:
                 conn.set_trace_callback(None)
+
 
     def test_sanitize_fts5_query_strips_dangerous_chars(self):
         """Unit test for _sanitize_fts5_query static method."""
@@ -1803,8 +1820,10 @@ class TestSchemaInit:
         assert binding["user_id"] == "208214988"
         assert binding["session_key"] == "telegram:dm:208214988:thread:17585"
         assert binding["session_id"] == "topic-session"
-        # Local /cwd extension bumps the topic schema to v4.
-        assert db.get_meta("telegram_dm_topic_schema_version") == "4"
+        # The topic schema lands on the current version (v4 /cwd, v5 custom_logo_at) —
+        # asserted against the constant, not a literal that goes stale on every bump.
+        from hermes_state_telegram import TELEGRAM_DM_TOPIC_SCHEMA_VERSION
+        assert db.get_meta("telegram_dm_topic_schema_version") == TELEGRAM_DM_TOPIC_SCHEMA_VERSION
         db.close()
 
 
