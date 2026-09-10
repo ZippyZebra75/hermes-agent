@@ -2142,8 +2142,14 @@ _USAGE_STATE: Dict[str, Any] = {
     # surfaces without streaming (no deltas to time).
     "session_decode_seconds": 0.0,
     "session_api_seconds": 0.0,
+    # Footer ttft: the sum of ONE time-to-first-token per turn (the turn's first call that
+    # streamed a delta), plus the per-call stamps it is derived from — the monotonic request
+    # issue time and the turn id whose TTFT was already folded (one record per turn).
+    "session_ttft_seconds": 0.0,
     "_api_decode_started_at": None,
     "_api_decode_last_at": None,
+    "_api_request_started_mono": None,
+    "_turn_ttft_recorded_for": None,
     "session_estimated_cost_usd": 0.0,
     "session_cost_status": "unknown",
     "session_cost_source": "none",

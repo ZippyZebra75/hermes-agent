@@ -1,7 +1,19 @@
 # Runtime footer 的三条投递路径
 
-`display.runtime_footer.fields` 渲染出一行元信息（model / context_pct / latency / tps / cwd），
+`display.runtime_footer.fields` 渲染出一行元信息（model / context_pct / latency / tps / ttft / cwd），
 由 `gateway/runtime_footer.py` 生成。它必须**每轮只出现一次**，且**不能丢**。
+
+字段与数据来源（新字段一律 opt-in：不进 `_DEFAULT_FIELDS`，否则老用户的 footer 会变）：
+
+| 字段 | 值 | 来源 |
+|---|---|---|
+| `tps` | decode 期 token/s | `session_decode_seconds`（每次调用首个→最后一个 delta）|
+| `ttft` | 本轮模型起手延迟 | `session_ttft_seconds`（请求发出→该轮首次流式 delta）|
+| `out_tokens` | 本轮输出 token | `session_completion_tokens` 差值 |
+
+三者共用同一模式：agent 侧累计 session 计数器 → gateway 在 turn 开始快照
+（`turn_context.py` 的 `turn_*_start`）→ 结束时取差值放进 `usage` → `_footer_source` 合并后渲染。
+新增同类字段照这个模式走，别在 gateway 侧另起一套统计。
 
 ## 谁负责发
 

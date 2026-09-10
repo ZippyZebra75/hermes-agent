@@ -1270,8 +1270,12 @@ display:
 display:
   runtime_footer:
     enabled: true
-    fields: ["model", "context_pct", "cwd"]   # 支持字段：model、context_pct、cwd
+    fields: ["model", "context_pct", "cwd"]   # 支持字段：model、context_pct、latency、ttft、tps、out_tokens、cwd
 ```
+
+默认字段集为 `["model", "context_pct", "cwd"]`；`latency`、`ttft`、`tps`、`out_tokens` 需显式加入
+`fields` 才会显示（保持旧页脚字节不变）。拿不到数据的字段会静默省略；`ttft` 指本轮「请求发出 →
+首个流式 delta」的模型起手延迟，整轮没流式内容时自动不显示。
 
 `/footer` 斜杠命令在任何会话中运行时切换此功能。
 

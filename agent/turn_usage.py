@@ -63,7 +63,7 @@ def _fold_moa_usage(agent, canonical_usage):
     return _moa_client, canonical_usage, _moa_ref_cost
 
 
-def _fold_decode_window(agent: Any, api_duration: float) -> float:
+def _fold_decode_window(agent: Any, api_duration: float) -> tuple[float, float]:
     """Fold one completed API attempt's streaming timing into the session counters.
 
     ``session_api_seconds`` accumulates every attempt's request time — the tps fallback for
@@ -71,18 +71,46 @@ def _fold_decode_window(agent: Any, api_duration: float) -> float:
     streamed-delta window stamped by ``StreamDeliveryMixin._note_decode_activity`` — the
     bench-style decode denominator (excludes TTFT and tool time).  The per-call window is
     cleared either way so a usage-less attempt cannot bleed into the next call's window.
-    Returns the folded window in seconds (0.0 when the call streamed no usable span).
+    Returns ``(decode_window, ttft)`` in seconds; both are 0.0 when the call streamed no
+    usable span / the request issue time was never stamped.
     """
     agent.session_api_seconds += float(api_duration or 0.0)
     started = getattr(agent, "_api_decode_started_at", None)
     last = getattr(agent, "_api_decode_last_at", None)
+    request_started = getattr(agent, "_api_request_started_mono", None)
     window = 0.0
+    ttft = 0.0
     if started is not None and last is not None and last - started > 0.001:
         window = last - started
         agent.session_decode_seconds += window
+    # TTFT: request issue → first streamed delta of THIS call (text or reasoning — the window
+    # opens at the first delta, so ``started`` IS that first delta).  Same clock domain
+    # (monotonic) as the request stamp, so the subtraction is safe.
+    if started is not None and request_started is not None and started > request_started:
+        ttft = started - request_started
     agent._api_decode_started_at = None
     agent._api_decode_last_at = None
-    return window
+    agent._api_request_started_mono = None
+    return window, ttft
+
+
+def _record_turn_ttft(agent: Any, ttft: float) -> None:
+    """Record at most ONE TTFT per turn: the turn's first call that streamed a delta.
+
+    A turn's first call often emits nothing but tool calls (no deltas to time), which would
+    leave the footer's ``ttft`` blank; the first call that DOES stream then supplies the
+    turn's TTFT instead.  The value is keyed by ``_current_turn_id`` because the agent — and
+    this session counter — outlive a turn; the footer differentiates the counter per turn the
+    same way it does for tps/output tokens.
+    """
+    if ttft <= 0:
+        return
+    turn_id = getattr(agent, "_current_turn_id", "") or ""
+    if turn_id and getattr(agent, "_turn_ttft_recorded_for", None) == turn_id:
+        return
+    agent.session_ttft_seconds = (getattr(agent, "session_ttft_seconds", 0.0) or 0.0) + ttft
+    if turn_id:
+        agent._turn_ttft_recorded_for = turn_id
 
 
 def record_response_usage(
@@ -107,7 +135,8 @@ def record_response_usage(
         _note_usage_less = getattr(compressor, "note_usage_less_response", None)
         if callable(_note_usage_less):
             _note_usage_less()
-        _fold_decode_window(agent, api_duration)
+        _, _ttft = _fold_decode_window(agent, api_duration)
+        _record_turn_ttft(agent, _ttft)
         logger.info(
             "API call #%d: model=%s provider=%s in=? out=? total=? latency=%.1fs usage=unavailable",
             agent.session_api_calls, agent.model, agent.provider or "unknown", api_duration,
@@ -194,7 +223,8 @@ def record_response_usage(
     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
-    _decode_window = _fold_decode_window(agent, api_duration)
+    _decode_window, _ttft = _fold_decode_window(agent, api_duration)
+    _record_turn_ttft(agent, _ttft)
     # Rolling history for status-bar averages (last 10).
     with suppress(Exception):
         hist = getattr(agent, "_api_latency_history", None)

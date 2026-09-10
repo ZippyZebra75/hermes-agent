@@ -1823,6 +1823,8 @@ class TurnRunner:
         # Same snapshot for the tps denominator (bench-style decode window, #26877 follow-up).
         ctx.turn_decode_seconds_start = getattr(agent, "session_decode_seconds", 0.0) or 0.0
         ctx.turn_api_seconds_start = getattr(agent, "session_api_seconds", 0.0) or 0.0
+        # …and for the footer's ttft (one TTFT recorded per turn; see agent/turn_usage.py).
+        ctx.turn_ttft_seconds_start = getattr(agent, "session_ttft_seconds", 0.0) or 0.0
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
         # Actual token counts from the agent instance used for this run.  Read BEFORE the stream
         # finalize: the runtime footer renders model/context%/tps from these, and the consumer
@@ -1843,6 +1845,10 @@ class TurnRunner:
                                        - (ctx.turn_decode_seconds_start or 0.0)),
             "turn_api_seconds": max(0.0, (getattr(agent, "session_api_seconds", 0.0) or 0.0)
                                     - (ctx.turn_api_seconds_start or 0.0)),
+            # ttft: the turn's model start-up latency (request issue → first streamed delta of
+            # the turn's first streaming call).  0.0 = nothing streamed this turn.
+            "turn_ttft_seconds": max(0.0, (getattr(agent, "session_ttft_seconds", 0.0) or 0.0)
+                                     - (ctx.turn_ttft_seconds_start or 0.0)),
             "model": getattr(agent, "model", None) if agent else None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
         }

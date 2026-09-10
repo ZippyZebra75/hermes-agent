@@ -2134,9 +2134,12 @@ Supported fields:
 | `model` | Bare model id, vendor prefix dropped | `gpt-5.4` |
 | `context_pct` | Last-call context occupancy as a percent | `5%` |
 | `latency` | Wall-clock duration of the turn | `22s`, `1m05s` |
+| `ttft` | Model start-up latency for the turn: request issued → first streamed delta | `ttft 0.83s`, `ttft 2m05s` |
+| `tps` | Decode-phase throughput of the turn (streamed-delta window, TTFT and tool time excluded) | `45.2t/s`, `250t/s` |
+| `out_tokens` | Output tokens produced by this turn (not the session total) | `842 tok`, `12.3k tok` |
 | `cwd` | Home-relative working directory | `~` |
 
-The default field set is `["model", "context_pct", "cwd"]`. `latency` is opt-in — add it to `fields` to use it. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
+The default field set is `["model", "context_pct", "cwd"]`. `latency`, `ttft`, `tps` and `out_tokens` are opt-in — add them to `fields` to use them. Fields whose data is unavailable are skipped silently rather than rendering an empty slot (`ttft` is dropped for a turn that never streamed a delta).
 
 The `/footer` slash command toggles this at runtime in any session.
 

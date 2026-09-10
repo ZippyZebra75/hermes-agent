@@ -396,6 +396,10 @@ class AIAgent(
         self.session_api_seconds = 0.0
         self._api_decode_started_at = None
         self._api_decode_last_at = None
+        # Footer ttft (request issue → first streamed delta, once per turn).
+        self.session_ttft_seconds = 0.0
+        self._api_request_started_mono = None
+        self._turn_ttft_recorded_for = None
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"

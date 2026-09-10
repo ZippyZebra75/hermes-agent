@@ -88,6 +88,10 @@ class TurnContext:
     # delta (see _footer_source / _hmwa_runtime_footer_line).
     turn_decode_seconds_start: float = 0.0
     turn_api_seconds_start: float = 0.0
+    # Same snapshot pattern for the footer's ``ttft`` field: ``session_ttft_seconds`` adds at
+    # most one TTFT per turn (the first call of that turn which streamed a delta), so the
+    # turn's own value is the delta over this snapshot.
+    turn_ttft_seconds_start: float = 0.0
 
     # --- voice-ack wiring --------------------------------------------------
     _voice_ack_fired: list = field(default_factory=lambda: [False])

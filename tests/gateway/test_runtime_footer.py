@@ -349,6 +349,104 @@ class TestOutTokensField:
             ) == ""
 
 
+class TestTtftField:
+    """``ttft`` — the turn's model start-up latency (request issue → first streamed delta)."""
+
+    def test_renders_sub_ten_seconds_with_two_decimals(self):
+        for seconds, expected in ((0.42, "ttft 0.42s"), (3.19, "ttft 3.19s"), (9.94, "ttft 9.94s")):
+            out = format_runtime_footer(
+                model=None, context_tokens=0, context_length=None,
+                fields=("ttft",), ttft_seconds=seconds,
+            )
+            assert out == expected
+
+    def test_renders_whole_seconds_at_and_above_ten(self):
+        """Past 10s the decimals stop carrying information — whole seconds, then m/ss."""
+        for seconds, expected in ((10.0, "ttft 10s"), (47.4, "ttft 47s"), (59.4, "ttft 59s")):
+            out = format_runtime_footer(
+                model=None, context_tokens=0, context_length=None,
+                fields=("ttft",), ttft_seconds=seconds,
+            )
+            assert out == expected
+
+    def test_renders_minute_scale(self):
+        for seconds, expected in ((59.6, "ttft 1m00s"), (125.0, "ttft 2m05s")):
+            out = format_runtime_footer(
+                model=None, context_tokens=0, context_length=None,
+                fields=("ttft",), ttft_seconds=seconds,
+            )
+            assert out == expected
+
+    def test_skipped_when_unmeasured(self):
+        """None (no data) and <=0 (nothing streamed this turn) both drop the field."""
+        for value in (None, 0.0, 0, -1.0):
+            assert format_runtime_footer(
+                model="gpt-5", context_tokens=0, context_length=None,
+                fields=("ttft",), ttft_seconds=value,
+            ) == ""
+
+    def test_omitted_when_not_in_fields_list(self):
+        baseline = format_runtime_footer(
+            model="openai/gpt-5.4", context_tokens=512, context_length=2048,
+            cwd="", fields=("model", "context_pct"),
+        )
+        with_data = format_runtime_footer(
+            model="openai/gpt-5.4", context_tokens=512, context_length=2048,
+            cwd="", fields=("model", "context_pct"), ttft_seconds=1.5,
+        )
+        assert baseline == with_data
+        assert "ttft" not in with_data
+
+    def test_joins_with_other_fields_in_order(self):
+        out = format_runtime_footer(
+            model="openai/gpt-5.4", context_tokens=512, context_length=2048,
+            cwd="", fields=("model", "context_pct", "ttft", "tps"),
+            response_tokens=80, elapsed_ms=4000.0, ttft_seconds=1.26,
+        )
+        assert out == "gpt-5.4 · 25% · ttft 1.26s · 20.0t/s"
+
+    def test_not_in_default_fields(self):
+        """Opt-in like latency: an unset ``fields`` must not change existing footers."""
+        from gateway.runtime_footer import _DEFAULT_FIELDS
+
+        assert "ttft" not in _DEFAULT_FIELDS
+
+    def test_build_footer_line_threads_kwargs_through(self):
+        out = build_footer_line(
+            user_config={
+                "display": {
+                    "runtime_footer": {
+                        "enabled": True,
+                        "fields": ["model", "ttft"],
+                    }
+                }
+            },
+            platform_key="telegram",
+            model="openai/gpt-5.4",
+            context_tokens=0, context_length=None,
+            cwd="",
+            ttft_seconds=2.5,
+        )
+        assert out == "gpt-5.4 · ttft 2.50s"
+
+    def test_build_footer_line_old_callers_unaffected(self):
+        out = build_footer_line(
+            user_config={
+                "display": {
+                    "runtime_footer": {
+                        "enabled": True,
+                        "fields": ["model", "context_pct"],
+                    }
+                }
+            },
+            platform_key="telegram",
+            model="openai/gpt-5.4",
+            context_tokens=100, context_length=400,
+            cwd="",
+        )
+        assert "ttft" not in out
+
+
 class TestTpsField:
     def test_tps_renders_decimal_below_100(self):
         # 50 tokens in 2 seconds = 25 t/s — under 100, decimal format.

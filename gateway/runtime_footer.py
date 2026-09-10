@@ -4,8 +4,9 @@ minimal. Config: ``display.runtime_footer: {enabled: bool, fields: [model, conte
 toggled by ``/footer on|off``. Fields: ``model`` (vendor prefix dropped), ``context_pct`` (last-call
 occupancy), ``latency`` (turn wall-clock, opt-in — NOT in the default set so an unset ``fields``
 renders exactly as before), ``tps`` (decode-phase tokens/sec — opt-in like ``latency``),
-``cwd`` (home-relative), ``out_tokens`` (THIS turn's output tokens — opt-in like ``latency``).
-``gateway/run.py`` appends the footer to the final response only (never to
+``ttft`` (request issue → first streamed delta of the turn's first streaming call — opt-in like
+``latency``), ``cwd`` (home-relative), ``out_tokens`` (THIS turn's output tokens — opt-in like
+``latency``). ``gateway/run.py`` appends the footer to the final response only (never to
 tool-progress or streaming partials); when streaming already delivered the text, it goes out as a
 trailing message via ``send_trailing_footer()``.
 """
@@ -99,6 +100,29 @@ def _format_out_tokens(tokens: Optional[int]) -> str:
     return f"{tokens} tok"
 
 
+def _format_ttft(seconds: Optional[float]) -> str:
+    """Render time-to-first-token as ``ttft 0.83s`` / ``ttft 3s`` / ``ttft 1m05s`` ("" when unmeasured).
+
+    TTFT here is the model's OWN start-up latency: from a request being issued to the first
+    streamed delta of the turn's first call that streamed anything (see
+    ``agent.turn_usage._record_turn_ttft``) — tool time and earlier delta-less calls excluded.
+    Carries the ``ttft`` label because ``latency`` also renders bare seconds and the two can
+    appear side by side.  Sub-10s values keep TWO decimals (a 0.3s TTFT and a 0.39s TTFT are
+    different diagnoses, and this window is the one people actually tune); past 10s the digits
+    stop carrying information, so it rounds to whole seconds and then to ``1m05s``.  Missing or
+    nonsensical (<=0) values drop the field entirely.
+    """
+    if seconds is None or seconds <= 0:
+        return ""
+    if seconds < 10:
+        return f"ttft {seconds:.2f}s"
+    total = int(round(seconds))
+    if total < 60:
+        return f"ttft {total}s"
+    m, sec = divmod(total, 60)
+    return f"ttft {m}m{sec:02d}s"
+
+
 def _format_tps(response_tokens: Optional[int], elapsed_ms: Optional[float]) -> str:
     """Render a ``tokens-per-second`` value as ``"NNt/s"`` or return ``""``.
 
@@ -125,6 +149,7 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
                           turn_seconds: Optional[float] = None,
                           response_tokens: Optional[int] = None,
                           elapsed_ms: Optional[float] = None,
+                          ttft_seconds: Optional[float] = None,
                           fields: Iterable[str] = _DEFAULT_FIELDS) -> str:
     """Render the footer line, or "" if no fields have data. Fields whose data is missing (and
     unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots.
@@ -146,6 +171,8 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
         # Skipped when the caller supplied no token/timing data.
         "tps": lambda: _format_tps(response_tokens, elapsed_ms),
+        # Model start-up latency for this turn (opt-in, skipped when unmeasured).
+        "ttft": lambda: _format_ttft(ttft_seconds),
         # This turn's output tokens (same per-turn delta tps divides by decode time).
         "out_tokens": lambda: _format_out_tokens(response_tokens),
     }
@@ -156,17 +183,20 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
                       model: Optional[str], context_tokens: int, context_length: Optional[int],
                       cwd: Optional[str] = None, turn_seconds: Optional[float] = None,
                       response_tokens: Optional[int] = None,
-                      elapsed_ms: Optional[float] = None) -> str:
+                      elapsed_ms: Optional[float] = None,
+                      ttft_seconds: Optional[float] = None) -> str:
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
     to the final response themselves, preserving a single blank line of separation.
     ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
     ``latency`` field. ``response_tokens`` + ``elapsed_ms`` feed the optional ``tps`` field
     (``elapsed_ms`` = the turn's summed streamed-delta window; request time on non-streaming
-    surfaces)."""
+    surfaces). ``ttft_seconds`` is the turn's model start-up latency (request issue → first
+    streamed delta); ``None``/0 skips the ``ttft`` field."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
     return format_runtime_footer(model=model, context_tokens=context_tokens,
                                  context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
                                  response_tokens=response_tokens, elapsed_ms=elapsed_ms,
+                                 ttft_seconds=ttft_seconds,
                                  fields=cfg.get("fields") or _DEFAULT_FIELDS)

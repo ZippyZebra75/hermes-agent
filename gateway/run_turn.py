@@ -1478,6 +1478,11 @@ class GatewayTurnMixin:
             _decode_seconds = float(agent_result.get("turn_decode_seconds") or 0.0)
             if _decode_seconds <= 0:
                 _decode_seconds = float(agent_result.get("turn_api_seconds") or 0.0)
+            # ``turn_ttft_seconds`` is the turn's model start-up latency (request issue → first
+            # streamed delta of the first call that streamed; see agent/turn_usage.py).  0.0
+            # means nothing streamed this turn — pass None so the footer drops the field
+            # instead of printing ``ttft 0.0s``.
+            _ttft_seconds = float(agent_result.get("turn_ttft_seconds") or 0.0)
             _line = _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
@@ -1486,6 +1491,7 @@ class GatewayTurnMixin:
                 cwd=_footer_cwd, turn_seconds=_turn_seconds,
                 response_tokens=int(agent_result.get("turn_output_tokens") or 0) or None,
                 elapsed_ms=_decode_seconds * 1000.0 if _decode_seconds else None,
+                ttft_seconds=_ttft_seconds or None,
             )
             # Monospace footer (local patch): the metadata rides the turn-final message as an
             # inline code span, so it renders mono instead of blending into the answer body.
