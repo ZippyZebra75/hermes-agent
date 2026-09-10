@@ -22,6 +22,7 @@ Plus unit coverage for ``GatewayStreamConsumer.delivered_final_matches``.
 
 import asyncio
 import importlib
+import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -631,3 +632,119 @@ async def test_empty_fallback_final_after_split_records_only_what_survives():
     # The head is gone from the chat, so the complete answer was NOT delivered:
     # the gateway must be told this is a mismatch and send it.
     assert consumer.delivered_final_matches(complete) is False
+
+
+# ---------------------------------------------------------------------------
+# Turn-final dedupe — the answer already on screen must never be posted twice.
+#
+# Incident shape: a segment break finalized the answer into its own message and
+# then cleared the editable preview, so the turn ended with both delivery flags
+# False while the answer sat in the chat; the gateway re-sent the whole text as a
+# second message.  Draft frames must NOT count as "already on screen" — they are
+# ephemeral previews with no message id, so the gateway's send is the only
+# durable delivery.
+# ---------------------------------------------------------------------------
+
+
+class _DraftAdapter(FinalizeCaptureAdapter):
+    """Records draft frames so the ephemeral-preview guard can be asserted."""
+
+    def __init__(self):
+        super().__init__()
+        self.drafts = []
+
+    def supports_draft_streaming(self, chat_type=None, metadata=None, chat_id=None) -> bool:
+        return (chat_type or "").lower() in {"dm", "private"}
+
+    async def send_draft(self, chat_id, draft_id, content, metadata=None) -> SendResult:
+        self.drafts.append(content)
+        return SendResult(success=True, message_id=None)
+
+
+def _turn_final_consumer(adapter, *, transport: str = "edit", cursor: str = ""):
+    return GatewayStreamConsumer(
+        adapter,
+        "chat-dupe",
+        StreamConsumerConfig(
+            transport=transport, chat_type="dm", edit_interval=0.0,
+            buffer_threshold=1, cursor=cursor, fresh_final_after_seconds=0.0,
+        ),
+    )
+
+
+async def _drive_events(consumer, events, *, final_text=None):
+    """events: ("text"|"break", payload) tuples with a settle between them."""
+    task = asyncio.create_task(consumer.run())
+    await asyncio.sleep(0.02)
+    for kind, payload in events:
+        if kind == "break":
+            consumer.on_segment_break()
+        else:
+            consumer.on_delta(payload)
+        await asyncio.sleep(0.05)
+    consumer.finish(final_text)
+    await asyncio.wait_for(task, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_answer_finalized_by_a_segment_break_is_not_posted_twice():
+    """Segment-finalized answer + cleared preview must still suppress the gateway send."""
+    adapter = FinalizeCaptureAdapter()
+    consumer = _turn_final_consumer(adapter)
+    answer = "The complete answer. " * 8
+
+    await _drive_events(consumer, [("text", answer), ("break", None)], final_text=answer)
+
+    # The answer reached the chat exactly once (the finalized segment message) ...
+    assert [s["content"] for s in adapter.sent] == [answer]
+    # ... so the turn-final must be claimed against that message rather than left
+    # unflagged for the gateway's own (duplicate) send.
+    assert consumer.final_response_sent is True
+    assert consumer.final_content_delivered is True
+    assert consumer.delivered_final_matches(answer) is True
+    assert len(adapter.sent) == 1, "the same answer was posted twice"
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_turn_final_edit_claims_the_visible_answer():
+    """A flood on the cosmetic finalize edit must not turn into a duplicate send."""
+    adapter = _SplittingAdapter()
+    adapter.REQUIRES_EDIT_FINALIZE = True  # force the finalize edit instead of the no-op skip
+    consumer = _turn_final_consumer(adapter)
+    answer = "The complete answer. " * 8
+
+    assert await consumer._send_or_edit(answer) is True
+    assert consumer._last_sent_text == answer
+
+    adapter.fail_edits = True
+    assert await consumer._send_or_edit(answer, finalize=True) is False
+    assert consumer.final_content_delivered is True
+    assert consumer.delivered_final_matches(answer) is True
+
+
+@pytest.mark.asyncio
+async def test_draft_frames_never_count_as_a_durable_delivery():
+    """A live draft preview is ephemeral: it must not stand in for delivery."""
+    adapter = _DraftAdapter()
+    consumer = _turn_final_consumer(adapter, transport="draft")
+    consumer._use_draft_streaming = True
+    consumer._draft_id = 7
+
+    assert await consumer._send_draft_frame("the streamed answer") is True
+    assert consumer._visible_prefix() == "the streamed answer"  # it IS the visible text
+    assert consumer._final_payload_on_screen("the streamed answer") is False
+
+
+@pytest.mark.asyncio
+async def test_undelivered_preview_on_screen_warns_for_the_next_time(caplog):
+    """Ending a turn with our preview on screen and no claim must be diagnosable."""
+    adapter = FinalizeCaptureAdapter()
+    consumer = _turn_final_consumer(adapter)
+    answer = "Answer text. " * 4
+
+    with caplog.at_level(logging.WARNING, logger="gateway.stream_consumer"):
+        # No authoritative final text (interrupt shape): nothing to claim against.
+        await _drive_events(consumer, [("text", answer), ("break", None)])
+
+    assert consumer.final_content_delivered is False
+    assert any("no claimed delivery" in rec.getMessage() for rec in caplog.records)

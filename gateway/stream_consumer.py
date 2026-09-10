@@ -673,6 +673,75 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 *self._delivered_segment_texts)
         return bool(target) and any(sent.strip() == target for sent in seen)
 
+    def _final_payload_on_screen(self, text: str) -> bool:
+        """True when a REAL (durable) message already shows exactly ``text``.
+
+        The turn-final must never be posted as a second copy of text the user can still
+        see.  Draft frames are deliberately excluded: they carry no message id and expire
+        (~30s TTL), so they may never stand in for a delivered answer — the gateway's own
+        send is the only durable delivery there.  Fence variants are compared because a
+        streamed frame is fence-closed before it goes out (``_send_or_edit``) while the
+        payload handed in here may not be.
+        """
+        target = self._clean_for_display(text or "").strip()
+        if not target:
+            return False
+        variants = {target}
+        with contextlib.suppress(Exception):
+            variants.add(ensure_closed_code_fences(target).strip())
+        if any(sent.strip() in variants for sent in self._delivered_segment_texts):
+            return True
+        # Only an EDITABLE preview is durable: a draft-only turn has no real message yet.
+        return self._has_real_preview() and self._visible_prefix().strip() in variants
+
+    def _claim_visible_final(self) -> bool:
+        """Claim the turn-final when its answer is already on screen in a durable message.
+
+        Reached when the finalize route is gone: no editable preview (a segment break or an
+        interaction boundary cleared it) or the cosmetic finalize edit was rate-limited.
+        Without this the turn ended silently with both delivery flags False while the answer
+        sat in the chat — the gateway then posted the same long text a second time ("sent
+        twice").  A stale prefix is left alone: there the gateway's own send IS the recovery.
+
+        The claimed message keeps whatever it already renders — the collapsed trace block is
+        not re-rendered onto it — and the runtime footer is handed back to the gateway (which
+        sends it as its trailing message) instead of being silently dropped.
+        """
+        if not self._final_payload_on_screen(self._accumulated):
+            return False
+        if self._footer_line and not self._footer_missed:
+            self._footer_missed = True
+        # content_delivered alone suppresses the gateway's normal final send; the transport
+        # call did NOT report success, so ``final_response_sent`` stays untouched (matches the
+        # rate-limited-cleanup rescue in ``_on_edit_failure``).
+        self._final_content_delivered = True
+        self._record_turn_final_payload(self._accumulated)
+        logger.info(
+            "Turn final already on screen in a real message; claiming delivery "
+            "(chat=%s turn=%s message_id=%s previews=%s segments=%d) — gateway final send "
+            "suppressed.", self.chat_id, self._turn_id, self._message_id,
+            sorted(self._preview_message_ids), len(self._delivered_segment_texts),
+        )
+        return True
+
+    def _warn_undelivered_preview(self) -> None:
+        """A turn ending with our own durable preview on screen but nothing claimed will make
+        the gateway post the answer again.  The delivery flags alone hide that state, so log
+        the fields that decide it — this is the log line that makes the next occurrence
+        diagnosable."""
+        if self._final_response_sent or self._final_content_delivered:
+            return
+        if not (self._preview_message_ids or self._has_real_preview()):
+            return
+        logger.warning(
+            "Turn ended with a real preview on screen but no claimed delivery (chat=%s "
+            "turn=%s): message_id=%s previews=%s segments=%d accumulated=%d draft_id=%s "
+            "draft_streaming=%s — the gateway will send the answer again (duplicate risk).",
+            self.chat_id, self._turn_id, self._message_id,
+            sorted(self._preview_message_ids), len(self._delivered_segment_texts),
+            len(self._accumulated or ""), self._draft_id, self._use_draft_streaming,
+        )
+
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""
         self._queue.put(_NEW_SEGMENT)
@@ -1019,8 +1088,14 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         consumer streamed something (a no-stream turn keeps the gateway's final-send
         ownership).  Split delivery: wholesale adoption would repeat sealed heads, refusing
         makes the gateway resend the ENTIRE body — so append only the suffix when the final
-        strictly prefix-extends the ledger."""
-        if not (self._accumulated or self._message_id or self._last_sent_text):
+        strictly prefix-extends the ledger.
+
+        A finalized SEGMENT message counts as "streamed something": a segment break clears
+        ``_accumulated``/``_message_id``/``_last_sent_text`` while the answer stays on screen
+        in its own message, and dropping the authoritative final there left the consumer with
+        nothing to claim at got_done (the gateway then re-posted the answer)."""
+        if not (self._accumulated or self._message_id or self._last_sent_text
+                or self._delivered_segment_texts):
             return
         if not self._turn_split_delivery:
             final_payload = self._clean_for_display(final_raw)
@@ -1166,6 +1241,15 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
 
     async def _push_update(self, tick: "_Tick") -> None:
         """Send/edit this tick's visible text (cursor-suffixed unless finalizing)."""
+        if (tick.got_done and not self._has_real_preview()
+                and self._claim_visible_final()):
+            # The turn-final answer already sits in a real message (a segment break with
+            # no editable preview left): a first-send here would post the same text a
+            # second time, which is the duplicate users report as "sent twice".
+            tick.update_visible = True
+            self._last_edit_time = time.monotonic()
+            self._tool_progress_active = False
+            return
         display_text = self._accumulated
         if tick.is_interim:
             if self._use_native_streaming or self._tool_details_active():
@@ -1214,6 +1298,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 self._mark_final_delivered()
         elif self._accumulated:
             await self._finalize_edit_path(tick)
+        # Flags still False with our content on screen = the gateway is about to send the
+        # answer again; log the deciding state while it is still observable.
+        self._warn_undelivered_preview()
 
     async def _finalize_edit_path(self, tick: "_Tick") -> None:
         """Edit-transport finalize (the non-native got_done branches, in priority order)."""
@@ -1233,11 +1320,20 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             # The edit may exhaust flood strikes → fallback mode: send the unsent tail.
             if not await self._finalize_edit(self._accumulated) and self._fallback_final_send:
                 await self._send_fallback_final(self._accumulated)
+            elif not self._final_response_sent:
+                # Cosmetic finalize was rate-limited while the answer is already on
+                # screen: claim it, or the gateway posts the same answer again.
+                self._claim_visible_final()
         elif not self._already_sent:
             # Retry after the finalize tick failed.  finalize=True keeps stream-is-the-
             # message adapters out of the draft-frame branch, whose dedupe against the
             # last UNSEALED frame would report success with no transport call.
             await self._finalize_edit(self._accumulated)
+        else:
+            # No editable preview left (a segment break / boundary cleared it) but a real
+            # message of ours may already hold the whole answer — claim it instead of
+            # ending the turn silently, which made the gateway re-post the answer.
+            self._claim_visible_final()
 
     async def _finalize_edit(self, text: str, *, record: bool = True) -> bool:
         """finalize=True send_or_edit; on success mark the turn delivered (+ record payload)."""

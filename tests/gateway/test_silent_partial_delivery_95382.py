@@ -75,6 +75,10 @@ def _make_consumer(adapter=None, **overrides):
     consumer._initial_reply_to_id = None
     consumer.metadata = None
     consumer._already_sent = True
+    # Runtime-footer local patch: ``_record_turn_final_payload`` reads both on every
+    # recorded payload (this double predates them and skipped __init__).
+    consumer._footer_line = ""
+    consumer._footer_missed = False
     for key, value in overrides.items():
         setattr(consumer, key, value)
     return consumer

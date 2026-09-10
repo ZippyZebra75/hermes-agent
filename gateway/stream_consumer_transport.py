@@ -284,8 +284,12 @@ class StreamTransportMixin:
         if not getattr(result, "success", False):
             return False
         new_message_id = getattr(result, "message_id", None)
-        # Best-effort preview cleanup; never delete the message just sent.
-        await self._delete_previews(stale_ids, skip=new_message_id, label="Fresh-final")
+        # Best-effort preview cleanup; never delete the message just sent.  retry_on_false:
+        # Telegram's delete_message reports failure by RETURNING False (the same flood window
+        # that can break the fresh send), and a surviving preview is exactly the "answer sent
+        # twice" the user sees (#71047 Problem B).
+        await self._delete_previews(stale_ids, skip=new_message_id, label="Fresh-final",
+                                    retry_on_false=True)
         self._preview_message_ids = set()
         self._adopt_message_id(new_message_id)
         self._already_sent = True
@@ -531,11 +535,13 @@ class StreamTransportMixin:
             self._edit_supported = False
             return False
         turn_final = finalize and is_turn_final
-        if (turn_final and self.cfg.cursor and self._last_sent_text.endswith(self.cfg.cursor)
-                and self._visible_prefix() == text):
-            # Cosmetic final edit was rate-limited but the full answer is already on
-            # screen (cursor stuck): mark delivered so the gateway doesn't send it
-            # twice, and record the on-screen payload.
+        if turn_final and self._final_payload_on_screen(text):
+            # The cosmetic final edit was rate-limited, but the answer is ALREADY on screen —
+            # either the cursor is stuck on the last acked frame or the payload is identical
+            # to what the user can see.  Mark it delivered so the gateway does not post the
+            # same long answer a second time, and record the on-screen payload.  Record it on
+            # split turns too: post-#78541 an unrecorded split reads as a mismatch and would
+            # re-send this already-visible answer (#36965 / #25349).
             self._final_content_delivered = True
             self._record_turn_final_payload(text)
         # ``text`` is already cleaned/fence-closed here and equals the visible prefix — the on-screen
