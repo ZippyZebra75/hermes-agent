@@ -59,8 +59,11 @@ def test_legacy_rows_migrate_only_to_default(tmp_path: Path):
 
     db = SessionDB(db_path=db_path)
     db.apply_telegram_topic_migration()
-    # Local /cwd extension makes the post-migration schema v4, not upstream's v3.
-    assert db.get_meta("telegram_dm_topic_schema_version") == "4"
+    # Migration must land on the CURRENT schema version, whatever it is (v4 added the /cwd
+    # pin, v5 custom_logo_at). Asserting the constant, not a literal: a frozen number here
+    # is a change-detector that goes red on every further bump.
+    from hermes_state_telegram import TELEGRAM_DM_TOPIC_SCHEMA_VERSION
+    assert db.get_meta("telegram_dm_topic_schema_version") == TELEGRAM_DM_TOPIC_SCHEMA_VERSION
     assert db.is_telegram_topic_mode_enabled(
         chat_id=CHAT, user_id=CHAT, profile_name="default",
     )

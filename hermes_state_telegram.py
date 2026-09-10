@@ -22,6 +22,11 @@ def _normalize_telegram_topic_profile_name(profile_name: Optional[str] = None) -
     return name if name else "default"
 
 
+# Migration output version, recorded in state_meta — see apply_telegram_topic_migration's
+# docstring for the v1..v5 history.  Single source for the code AND its tests (a literal
+# repeated in test assertions is a change-detector: it goes stale on every schema bump).
+TELEGRAM_DM_TOPIC_SCHEMA_VERSION = "5"
+
 # (table, column list, DDL body). profile_name leads the PK: a private chat_id is the
 # user id, identical across bots sharing one state.db.
 _TOPIC_TABLES = (
@@ -161,7 +166,7 @@ class SessionTelegramTopicsMixin:
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                ("telegram_dm_topic_schema_version", "5"),
+                ("telegram_dm_topic_schema_version", TELEGRAM_DM_TOPIC_SCHEMA_VERSION),
             )
         self._execute_write(_do)
 
