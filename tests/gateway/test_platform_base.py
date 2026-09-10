@@ -2,6 +2,7 @@
 
 import os
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -943,6 +944,22 @@ class TestDockerContainerMediaPathTranslation:
         assert BasePlatformAdapter.validate_media_delivery_path(
             "/root/.hermes/auth.json"
         ) is None
+
+    def test_native_hermes_tree_credentials_are_denied_by_name(self, tmp_path, monkeypatch):
+        """The denylist must name the canonical ``<home>/.hermes`` credential surface, not
+        only the active root.  ``_HERMES_HOME``/``_HERMES_ROOT`` follow a redirected
+        HERMES_HOME (and are fixed at import), so a gateway rooted elsewhere lost the deny
+        entry for the NATIVE tree — which stays on disk with live tokens.  Asserted on the
+        composed denylist so it holds even where the real file is absent (the behavioural
+        test above only bites on a host that has one)."""
+        from gateway.platforms import base as base_mod
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        denied = {str(path) for path in base_mod._media_delivery_denied_paths()}
+        native = Path(os.path.expanduser("~")) / ".hermes"
+
+        assert str(native / "auth.json") in denied
+        assert str(native / ".env") in denied
 
 
 # ---------------------------------------------------------------------------

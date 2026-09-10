@@ -854,11 +854,21 @@ def _kanban_board_db_paths() -> List[Path]:
 
 
 def _media_delivery_denied_paths() -> List[Path]:
-    """Return absolute denylist paths under which delivery is never allowed."""
+    """Return absolute denylist paths under which delivery is never allowed.
+
+    The credential rels are denied under the ACTIVE root(s) AND under the canonical
+    ``<home>/.hermes`` tree.  ``_HERMES_HOME`` / ``_HERMES_ROOT`` are fixed at import time
+    and follow a redirected HERMES_HOME, so a gateway whose root points elsewhere (a profile
+    dir, a custom/Docker root) otherwise loses the deny entry for the NATIVE tree — which is
+    still on disk and still holds live tokens (``auth.json``, ``.env``).  Live gap: a
+    root-run gateway delivered ``/root/.hermes/auth.json``, because the only covering entry
+    was the ``/root`` prefix and that one is exempted as the running user's own home.
+    """
     home = Path(os.path.expanduser("~"))
     return [*map(Path, _MEDIA_DELIVERY_DENIED_PREFIXES),
             *(home / sub for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS),
-            *(r / rel for r in (_HERMES_HOME, _HERMES_ROOT) for rel in _ROOT_CREDENTIAL_PATHS),
+            *(r / rel for r in {_HERMES_HOME, _HERMES_ROOT, home / ".hermes"}
+              for rel in _ROOT_CREDENTIAL_PATHS),
             *_kanban_board_db_paths()]
 
 
