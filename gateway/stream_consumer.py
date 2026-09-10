@@ -182,6 +182,11 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # native overlay) and NOT reset per segment — the final message carries EVERY
         # tool call and inter-tool-call interim text of the turn.
         self._details_entries: list[tuple[str, str]] = []
+        # Last block that PASSED the adapter probe, per open/collapsed state: a tick whose
+        # block cannot render reuses it instead of erasing the trace from the live frame.
+        self._details_block_cache: dict[bool, str] = {}
+        # One log line per (state, reused?) decision — the block path runs on every frame.
+        self._details_block_log: set[tuple[bool, bool]] = set()
         # Runtime footer (model/context/latency): appended to the SAME turn-final message
         # instead of a trailing send (see set_footer).
         self._footer_line = ""
@@ -471,20 +476,23 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
 
         Degradation order — never lose the trace while a smaller version still renders:
         full block → drop the quoted thinking (Desktop math-in-details guard) → drop the
-        OLDEST entries with a truncation note (rich length cap)."""
+        OLDEST entries with a truncation note (rich length cap) → reuse the last block that
+        rendered for this state.  The last step used to return "" and erase the WHOLE trace
+        from the live frame mid-run (the user sees the block vanish while execution is still
+        going); a stale-but-valid block always beats losing the trace."""
         entries = list(self._details_entries)
         if not entries:
             return ""
         block = self._render_details_block(entries, open_=open_)
         if self._details_block_ok(block):
-            return block
+            return self._cache_details_block(open_, block)
         # The quoted thinking (or a tool line) tripped the Desktop math-in-details guard:
         # drop the thinking and keep the tool trace rather than losing the whole block.
         if any(kind == "reasoning" for kind, _ in entries):
             entries = [(kind, text) for kind, text in entries if kind != "reasoning"]
             block = self._render_details_block(entries, open_=open_)
             if self._details_block_ok(block):
-                return block
+                return self._cache_details_block(open_, block)
         # Over the rich length cap: keep the most RECENT entries (what the user is waiting
         # on) and say how many were dropped, instead of losing the whole block.
         dropped = 0
@@ -494,8 +502,30 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             note = ("note", f"…已省略更早的 {dropped} 条记录")
             block = self._render_details_block([note] + entries, open_=open_)
             if self._details_block_ok(block):
-                return block
-        return ""
+                return self._cache_details_block(open_, block)
+        cached = self._details_block_cache.get(open_)
+        # Log once per state: this code runs on EVERY frame of a long tool run.
+        key = (open_, bool(cached))
+        if key not in self._details_block_log:
+            self._details_block_log.add(key)
+            if cached:
+                logger.warning(
+                    "Tool-details block cannot render right now (%d entries, %d chars, adapter "
+                    "probe refused) — reusing the last block that rendered (chat=%s turn=%s).",
+                    len(self._details_entries), len(block), self.chat_id, self._turn_id)
+            else:
+                logger.warning(
+                    "Tool-details block dropped from the live frame: %d entries, %d chars, "
+                    "adapter probe refused (math-in-details guard / rich cap) and no earlier "
+                    "render to reuse (chat=%s turn=%s).",
+                    len(self._details_entries), len(block), self.chat_id, self._turn_id)
+        return cached or ""
+
+    def _cache_details_block(self, open_: bool, block: str) -> str:
+        """Remember the last block that PASSED the adapter probe for this open/collapsed
+        state, so a later unrenderable tick can reuse it instead of erasing the trace."""
+        self._details_block_cache[open_] = block
+        return block
 
     def _details_block_ok(self, block: str) -> bool:
         """Adapter probe: can this block render safely (Desktop math guard / rich cap)?"""
@@ -1163,7 +1193,17 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
             return
         content = self._compose_frame_content() if self._tool_details_active() else self._accumulated
         if not content.strip():
-            return
+            # Nothing composable right now (empty trace + no text): re-post the frame that is
+            # already on screen instead of SKIPPING — a skipped keepalive lets the ~30s draft
+            # expire mid-run, which drops the whole preview (trace block included) off the
+            # client and looks like the details block vanished by itself.
+            content = self._last_sent_text or ""
+            if not content.strip():
+                logger.debug("Draft keepalive has nothing to re-post (chat=%s turn=%s)",
+                             self.chat_id, self._turn_id)
+                return
+            logger.info("Draft keepalive re-posted the last frame to keep the preview alive "
+                        "(chat=%s turn=%s)", self.chat_id, self._turn_id)
         await self._send_draft_frame(content)
 
     async def _split_first_send(self, tick: "_Tick") -> bool:

@@ -9,6 +9,7 @@ While streaming the block lives in the draft frames and folds one-way once the a
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -232,6 +233,38 @@ class TestToolDetailsDegrade:
         assert "step-11" in block        # newest kept
         assert "step-00" not in block    # oldest dropped
 
+    def test_unrenderable_tick_reuses_the_last_rendered_block(self, caplog):
+        """Freezing the trace block must never ERASE it from the live frame: a tick whose
+        block cannot render (math guard / rich cap) reuses the last block that did render."""
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        consumer._use_draft_streaming = True
+        consumer._remember_detail("tool", "terminal: step-1")
+        good = consumer._tool_details_block(open_=True)
+        assert good.startswith("<details")
+
+        adapter.tool_details_block_ok = lambda block: False
+        with caplog.at_level(logging.WARNING, logger="gateway.stream_consumer"):
+            again = consumer._tool_details_block(open_=True)
+
+        assert again == good, "an unrenderable tick dropped the whole trace block"
+        assert any("reusing the last block" in rec.getMessage() for rec in caplog.records)
+
+    def test_block_that_never_rendered_warns_instead_of_vanishing_silently(self, caplog):
+        """First-frame refusal has no earlier render to reuse — it must be loud, since the
+        legacy overlay takes over and the user just sees the trace disappear."""
+        adapter = _make_adapter()
+        adapter.tool_details_block_ok = lambda block: False
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        consumer._use_draft_streaming = True
+        consumer._remember_detail("tool", "terminal: step-1")
+
+        with caplog.at_level(logging.WARNING, logger="gateway.stream_consumer"):
+            block = consumer._tool_details_block(open_=True)
+
+        assert block == ""
+        assert any("dropped from the live frame" in rec.getMessage() for rec in caplog.records)
+
     @pytest.mark.asyncio
     async def test_flush_tick_delivers_plain_text_not_the_trace(self):
         """A flush tick is NOT interim, so it posts ``_accumulated`` without the trace
@@ -426,6 +459,23 @@ class TestToolDetailsDraftLiveness:
 
         frames = [f for f in adapter.draft_calls if "hello" in f]
         assert len(frames) >= 2, "keepalive must refresh the preview while the turn is alive"
+
+    @pytest.mark.asyncio
+    async def test_keepalive_reposts_the_last_frame_instead_of_skipping(self):
+        """A skipped keepalive lets the ~30s draft expire mid-run — the whole preview
+        (trace block included) then drops off the client and looks like the block vanished.
+        When nothing composes right now, the frame already on screen must be re-posted."""
+        adapter = _make_adapter()
+        consumer = _make_consumer(adapter, tool_progress_details=True)
+        consumer._use_draft_streaming = True
+        consumer._draft_id = 11
+        consumer._last_draft_frame_at = 0.0        # keepalive is due
+        consumer._accumulated = ""                 # nothing composable this tick
+        consumer._last_sent_text = "⚙️ 执行 · 3 步"
+
+        await consumer._maybe_keepalive_draft()
+
+        assert adapter.draft_calls == ["⚙️ 执行 · 3 步"]
 
 
 class TestToolDetailsReasoning:

@@ -639,6 +639,7 @@ def test_declined_INITIAL_draft_is_not_retried_as_a_plain_send():
         def __init__(self):
             self.adapter = adapter
             self.chat_id = "C1"
+            self._turn_id = "T1"   # the decline WARNING names the turn
             self._draft_id = 1
             self._use_draft_streaming = True
             self._draft_failures = 0
@@ -868,6 +869,7 @@ def test_declined_draft_frame_is_terminal_for_the_run():
         def __init__(self, adapter):
             self.adapter = adapter
             self.chat_id = "C1"
+            self._turn_id = "T1"   # the decline WARNING names the turn
             self._draft_id = "d1"
             self._use_draft_streaming = True
             self._draft_failures = 0

@@ -164,11 +164,13 @@ class StreamTransportMixin:
             # Should never happen (set in tandem with _use_draft_streaming in run()).
             self._use_draft_streaming = False
             return False
+        _fail_reason = ""
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id, draft_id=self._draft_id, content=text,
                 metadata=self._draft_metadata())
         except Exception as e:
+            _fail_reason = f"send_draft raised: {e}"
             logger.debug("send_draft raised, disabling draft transport for this run: %s", e)
         else:
             if getattr(result, "success", False):
@@ -181,6 +183,7 @@ class StreamTransportMixin:
             # connector just refused. Verified: ops were ['draft', 'send'].
             from gateway.relay.egress import declined_send
 
+            _fail_reason = f"send_draft failed: {getattr(result, 'error', 'unknown')}"
             if declined_send(result):
                 logger.warning(
                     "send_draft DECLINED by the connector's egress guard; "
@@ -188,9 +191,14 @@ class StreamTransportMixin:
                     "is not approved for this connection)"
                 )
                 self._egress_declined = True
-            logger.debug("send_draft returned success=False, disabling draft transport: %s",
-                         getattr(result, "error", "unknown"))
         self._draft_failures += 1
+        # Name the visible consequence: the live frame is the only surface that can render
+        # the open <details> trace block, so a mid-run draft death erases the block from the
+        # preview for the rest of the turn (it returns only inside the turn-final).
+        logger.warning(
+            "Draft transport disabled mid-run (%s) — live frames can no longer carry the "
+            "<details> trace block for the rest of this turn (chat=%s turn=%s)",
+            _fail_reason or "unknown", self.chat_id, self._turn_id)
         self._use_draft_streaming = False
         return False
 
